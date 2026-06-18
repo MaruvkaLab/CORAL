@@ -30,7 +30,7 @@ Preprint available at https://doi.org/10.64898/2026.02.02.703326
 ### Recommended installation
 
 ```bash
-git clone https://github.com/asafpinhasitechnion/CORAL.git
+git clone https://github.com/MaruvkaLab/CORAL.git
 cd CORAL
 conda env create -f environment.yml
 conda activate coral-env
