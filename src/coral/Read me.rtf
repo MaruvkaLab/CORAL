@@ -1,0 +1,251 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2761
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\froman\fcharset0 Times-Roman;\f1\froman\fcharset0 Times-Bold;\f2\fmodern\fcharset0 Courier-Bold;
+\f3\fmodern\fcharset0 Courier;\f4\ftech\fcharset77 Symbol;}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;\red109\green109\blue109;\red0\green0\blue233;
+}
+{\*\expandedcolortbl;;\cssrgb\c0\c0\c0;\cssrgb\c50196\c50196\c50196;\cssrgb\c0\c0\c93333;
+}
+{\*\listtable{\list\listtemplateid1\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid1\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid1}
+{\list\listtemplateid2\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid101\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid2}
+{\list\listtemplateid3\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid201\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid3}
+{\list\listtemplateid4\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid301\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid4}
+{\list\listtemplateid5\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid401\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid5}
+{\list\listtemplateid6\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid501\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid6}
+{\list\listtemplateid7\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid601\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid7}}
+{\*\listoverridetable{\listoverride\listid1\listoverridecount0\ls1}{\listoverride\listid2\listoverridecount0\ls2}{\listoverride\listid3\listoverridecount0\ls3}{\listoverride\listid4\listoverridecount0\ls4}{\listoverride\listid5\listoverridecount0\ls5}{\listoverride\listid6\listoverridecount0\ls6}{\listoverride\listid7\listoverridecount0\ls7}}
+\paperw11900\paperh16840\margl1440\margr1440\vieww37900\viewh21300\viewkind0
+\deftab720
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f0\fs48 \cf0 \expnd0\expndtw0\kerning0
+Here's what each file does:\
+\pard\pardeftab720\partightenfactor0
+\cf3 \
+\pard\pardeftab720\sa298\partightenfactor0
+
+\f1\b \cf0 Entry Points\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/__init__.py"}}{\fldrslt 
+\f2 \cf4 \ul \ulc4 __init__.py}}
+\f0\b0  Package init \'97 just exports 
+\f3 MutationExtractionPipeline
+\f0  and 
+\f3 MultiSpeciesMutationPipeline
+\f0  as the public API.\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/__main__.py"}}{\fldrslt 
+\f2\b \cf4 \ul \ulc4 __main__.py}} Allows running the package with 
+\f3 python -m coral
+\f0 . Just delegates to 
+\f3 cli.py
+\f0 .\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/cli.py"}}{\fldrslt 
+\f2\b \cf4 \ul \ulc4 cli.py}} Command-line interface with three subcommands:\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls1\ilvl0
+\f3 \cf0 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+run_single
+\f0  \'97 3-species pipeline (outgroup + 2 ingroups)\
+\ls1\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+run_multi
+\f0  \'97 N-species pipeline from a Newick tree or species list\
+\ls1\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+run_phylip
+\f0  \'97 standalone PHYLIP parsimony analysis on an existing mutation matrix\
+\pard\pardeftab720\partightenfactor0
+\cf3 \
+\pard\pardeftab720\sa298\partightenfactor0
+
+\f1\b \cf0 Core Pipeline\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/pipeline.py"}}{\fldrslt 
+\f2 \cf4 \ul \ulc4 pipeline.py}}
+\f0\b0  The main orchestrator, containing two pipeline classes:\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls2\ilvl0
+\f3 \cf0 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+MutationExtractionPipeline
+\f0  \'97 the 3-species pipeline: downloads genomes 
+\f4 \uc0\u8594 
+\f0  fragments ingroup genomes into simulated reads 
+\f4 \uc0\u8594 
+\f0  aligns to outgroup 
+\f4 \uc0\u8594 
+\f0  pileup 
+\f4 \uc0\u8594 
+\f0  extracts 3-mer/5-mer mutations 
+\f4 \uc0\u8594 
+\f0  normalizes 
+\f4 \uc0\u8594 
+\f0  plots 
+\f4 \uc0\u8594 
+\f0  cleans up. Times and logs memory at each stage.\
+\ls2\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+MultiSpeciesMutationPipeline
+\f0  \'97 N-species version: parses a Newick tree or species list, runs the same align/pileup steps, then uses Fitch parsimony to assign mutations to tree branches, and runs PHYLIP for phylogenetic reconstruction.\
+\pard\pardeftab720\partightenfactor0
+\cf3 \
+\pard\pardeftab720\sa298\partightenfactor0
+
+\f1\b \cf0 Managers (one responsibility each)\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/genome_manager.py"}}{\fldrslt 
+\f2 \cf4 \ul \ulc4 genome_manager.py}}
+\f0\b0  
+\f3 Genome
+\f0  class \'97 downloads a genome assembly from NCBI using 
+\f3 datasets
+\f0 , indexes it for BWA/bwa-mem2 (or just 
+\f3 samtools faidx
+\f0  for minimap2), and fragments the FASTA into overlapping simulated short reads written as a FASTQ.\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/alignment_manager.py"}}{\fldrslt 
+\f2\b \cf4 \ul \ulc4 alignment_manager.py}} 
+\f3 Aligner
+\f0  class \'97 aligns a species' fragmented FASTQ to the reference genome using BWA, bwa-mem2, minimap2, or bbmap. Two modes:\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls3\ilvl0
+\f3 \cf0 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+align_streamed
+\f0 : pipes aligner 
+\f4 \uc0\u8594 
+\f0  filter 
+\f4 \uc0\u8594 
+\f0  sort in one pass (memory-efficient)\
+\ls3\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+align_disk_cached
+\f0 : saves a raw BAM first, then filters it\
+\pard\pardeftab720\sa240\partightenfactor0
+\cf0 Also contains 
+\f3 filter_sam
+\f0  (simple MAPQ filter) and 
+\f3 with_continuity_filter_sam
+\f0  (the key filter: keeps low-MAPQ reads if they overlap with a high-MAPQ read of the same fragment from the adjacent position \'97 the "continuity" heuristic to rescue reads at species-specific loci).\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/pileup_manager.py"}}{\fldrslt 
+\f2\b \cf4 \ul \ulc4 pileup_manager.py}} 
+\f3 Pileup
+\f0  class \'97 runs 
+\f3 samtools mpileup
+\f0  across all aligned BAMs against the reference, compresses the output to 
+\f3 .pileup.gz
+\f0 . This is the data structure all mutation extraction reads from.\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/mutation_extractor_manager.py"}}{\fldrslt 
+\f2\b \cf4 \ul \ulc4 mutation_extractor_manager.py}} Three extractors for the 2-species case:\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls4\ilvl0
+\f3 \cf0 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+MutationExtractor
+\f0  \'97 scans the pileup with a 3-position sliding window; identifies sites where exactly one species differs from the outgroup and calls the 3-mer context mutation (e.g. 
+\f3 A[C>T]G
+\f0 ). Writes per-species JSON counts and full CSV.\
+\ls4\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+FiveMerExtractor
+\f0  \'97 same idea but uses a 5-position window for 5-mer context mutations.\
+\ls4\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+TripletExtractor
+\f0  \'97 counts 3-mer background contexts (not currently used in the pipeline, commented out).\
+\ls4\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+MutationNormalizer
+\f0  \'97 loads the mutation JSONs and triplet JSONs, collapses to pyrimidine-context (C/T ref), normalizes mutation counts by triplet frequency, and exports TSV tables for plotting.\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/multiple_species_mutation_extractor_manager.py"}}{\fldrslt 
+\f2\b \cf4 \ul \ulc4 multiple_species_mutation_extractor_manager.py}} 
+\f3 MultipleSpeciesMutationExtractor
+\f0  \'97 the N-species version. Scans the pileup for positions where all flanking bases agree across species but the central base varies, building a 
+\f3 matching_bases.csv.gz
+\f0 . Then applies Fitch parsimony on the phylogenetic tree to assign each variable site to a specific branch, collecting per-branch mutation spectra. Saves per-branch CSVs and spectra plots.\
+\pard\pardeftab720\partightenfactor0
+\cf3 \
+\pard\pardeftab720\sa298\partightenfactor0
+
+\f1\b \cf0 Utilities & Support\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/cleanup_manager.py"}}{\fldrslt 
+\f2 \cf4 \ul \ulc4 cleanup_manager.py}}
+\f0\b0  
+\f3 PipelineCleaner
+\f0  \'97 deletes intermediate files after the pipeline runs: raw BAMs, the pileup, genome FASTA/FASTQ folders, interval files. Called at the end of 
+\f3 MutationExtractionPipeline.run()
+\f0 .\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/multiple_species_utils.py"}}{\fldrslt 
+\f2\b \cf4 \ul \ulc4 multiple_species_utils.py}} Tree/species utilities used by the multi-species pipeline:\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls5\ilvl0
+\f3 \cf0 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+parse_species_accession_from_newick
+\f0  \'97 extracts 
+\f3 Species|Accession
+\f0  leaf names from a Newick string and auto-detects the outgroup.\
+\ls5\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+annotate_tree_with_indices
+\f0  / 
+\f3 annotate_list_with_indices
+\f0  \'97 assigns numeric indices to terminals (outgroup = 0, rest alphabetical), used to match pileup columns to tree leaves.\
+\ls5\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+save_annotated_tree
+\f0  \'97 writes the index-annotated tree to disk.\
+\ls5\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+collapse_mutations
+\f0  \'97 converts all mutations to pyrimidine-ref strand convention.\
+\ls5\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+load_random_rows
+\f0  \'97 randomly samples up to 1M rows from a gzipped CSV (for PHYLIP input size limits).\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/run_phylip.py"}}{\fldrslt 
+\f2\b \cf4 \ul \ulc4 run_phylip.py}} Wraps the PHYLIP 
+\f3 dnapars
+\f0  (or other) executable:\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls6\ilvl0\cf0 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+Writes the mutation matrix as a PHYLIP-format 
+\f3 infile
+\f0 .\
+\ls6\ilvl0\kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+Runs PHYLIP twice: once without a starting tree (finds the most parsimonious tree) and once with the input Newick tree (scores that topology).\
+\ls6\ilvl0\kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+Compares parsimony scores to assess whether the given species tree is the most parsimonious explanation of the observed mutations.\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/plot_utils.py"}}{\fldrslt 
+\f2\b \cf4 \ul \ulc4 plot_utils.py}} Three plotters:\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls7\ilvl0
+\f3 \cf0 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+MutationSpectraPlotter
+\f0  \'97 bar plots of 96-class (3-mer) or 5-mer mutation spectra, color-coded by mutation type; overlay comparison for 2 species.\
+\ls7\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+CoveragePlotter
+\f0  \'97 sliding-window read coverage plot along a chromosome, computed from the interval TSV files.\
+\ls7\ilvl0
+\f3 \kerning1\expnd0\expndtw0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+MutationDensityPlotter
+\f0  \'97 sliding-window mutation density along a chromosome, optionally filtered by mutation category (e.g. CpG transitions) and optionally normalized by coverage.\
+\pard\pardeftab720\sa240\partightenfactor0
+{\field{\*\fldinst{HYPERLINK "https://claude.ai/epitaxy/Desktop/PhD/CORAL/Codes/src_codes/utils.py"}}{\fldrslt 
+\f2\b \cf4 \ul \ulc4 utils.py}} Tiny shared helpers: 
+\f3 log
+\f0  (conditional print), 
+\f3 run_cmd
+\f0  / 
+\f3 run_cmd_raise
+\f0  (subprocess wrappers), and 
+\f3 get_top_n_chromosomes
+\f0  (reads a 
+\f3 .fai
+\f0  index and returns the N longest chromosomes by name).\
+}

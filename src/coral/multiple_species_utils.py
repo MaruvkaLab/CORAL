@@ -44,10 +44,10 @@ def annotate_tree_with_indices(newick_str, outgroup_name, file_path=None, verbos
         if '|' in leaf.name:
             leaf.name = leaf.name.split('|', 1)[0]
 
-    # Sort: outgroup first, rest alphabetically
+    # Outgroup first, then rest in tree leaf order (must match pileup BAM order)
     terminals = tree.get_leaves()
     sorted_terminals = [t for t in terminals if t.name == outgroup_name] + \
-                       sorted([t for t in terminals if t.name != outgroup_name], key=lambda x: x.name)
+                       [t for t in terminals if t.name != outgroup_name]
 
     terminal_mapping = {}
     for idx, node in enumerate(sorted_terminals):
@@ -75,21 +75,23 @@ def annotate_tree_with_indices(newick_str, outgroup_name, file_path=None, verbos
         for node in tree.traverse():
             node.name = original_names[node]
 
-        mapping_path = f"{os.path.splitext(file_path)[0]}_mapping.json"
+        mapping_path = f"{os.path.splitext(file_path)[0]}_mapping2.json" ### edited
         with open(mapping_path, "w") as f:
             json.dump(terminal_mapping, f, indent=2)
 
         log(f"Annotated tree saved to {annotated_tree_path}", verbose)
         log(f"Terminal mapping saved to {mapping_path}", verbose)
 
-    return tree, terminal_mapping
+    sorted_terminal_names = [node.name for node in sorted_terminals]
+    return tree, terminal_mapping, sorted_terminal_names
 
 
 def annotate_list_with_indices(species_list, outgroup_name, file_path=None, verbose=True):
 
     species_list = [species[0] for species in species_list]
     
-    sorted_terminals = [outgroup_name] + sorted([s for s in species_list if s != outgroup_name])
+    # Outgroup first, then rest in input order (must match pileup BAM order)
+    sorted_terminals = [outgroup_name] + [s for s in species_list if s != outgroup_name]
 
     terminal_mapping = {}
     for idx, node in enumerate(sorted_terminals):
@@ -97,7 +99,7 @@ def annotate_list_with_indices(species_list, outgroup_name, file_path=None, verb
         terminal_mapping[node] = idx
 
     if file_path is not None:
-        mapping_path = f"{os.path.splitext(file_path)[0]}_mapping.json"
+        mapping_path = f"{os.path.splitext(file_path)[0]}_mapping2.json" ### edited
         with open(mapping_path, "w") as f:
             json.dump(terminal_mapping, f, indent=2)
         

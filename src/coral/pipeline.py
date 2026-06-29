@@ -375,26 +375,39 @@ class MultiSpeciesMutationPipeline:
         log("Pipeline completed successfully.", self.verbose)
 
     def parse_and_annotate_tree(self):
-        self.species_dict, default_outgroup = parse_species_accession_from_newick(self.newick_tree)
+        accession_lookup, default_outgroup = parse_species_accession_from_newick(self.newick_tree)
         if not self.outgroup_name:
             self.outgroup_name = default_outgroup
-        self.tree, self.terminal_mapping = annotate_tree_with_indices(self.newick_tree, self.outgroup_name, verbose=self.verbose)
+        self.tree, self.terminal_mapping, self.species_list = annotate_tree_with_indices(self.newick_tree, self.outgroup_name, verbose=self.verbose)
+
+        # Rebuild species_dict in the same order as species_list (outgroup first),
+        # so self.genomes and self.alignments follow the same ordering.
+        self.species_dict = {name: accession_lookup[name] for name in self.species_list}
 
         tree_path = os.path.join(self.output_dir, "annotated_tree.nwk")
         save_annotated_tree(self.tree, tree_path)
         with open(os.path.join(self.output_dir, "species_mapping.json"), 'w') as f:
             json.dump(self.terminal_mapping, f, indent=2)
+        #with open(os.path.join(self.output_dir, "species_mapping2.json"), 'w') as f:
+        #    json.dump(self.species_dict, f, indent=2)
 
     def parse_and_annotate_list(self):
-        self.species_dict = {key:value for key,value in self.species_list}
         if not self.outgroup_name:
             raise ValueError("Outgroup name must be provided when species_list is used.")
-        
-        _, self.terminal_mapping = annotate_list_with_indices(self.species_list, self.outgroup_name, verbose=self.verbose)
+
+        accession_lookup = {key: value for key, value in self.species_list}
+
+        self.species_list, self.terminal_mapping = annotate_list_with_indices(self.species_list, self.outgroup_name, verbose=self.verbose)
+
+        # Rebuild species_dict in the same order as species_list (outgroup first),
+        # so self.genomes and self.alignments follow the same ordering.
+        self.species_dict = {name: accession_lookup[name] for name in self.species_list}
 
         with open(os.path.join(self.output_dir, "species_mapping.json"), 'w') as f:
             json.dump(self.terminal_mapping, f, indent=2)
-    
+        #with open(os.path.join(self.output_dir, "species_mapping2.json"), 'w') as f:
+        #    json.dump(self.species_dict, f, indent=2)
+
 
     def download_index_and_fragment(self):
         for species, accession in self.species_dict.items():
@@ -417,6 +430,9 @@ class MultiSpeciesMutationPipeline:
                     force=self.no_cache
                 )
             self.genomes[species] = genome
+
+        with open(os.path.join(self.output_dir, "genome_species_mapping.json"), 'w') as f:
+            json.dump(self.species_dict, f, indent=2)
 
     def align_species_to_outgroup(self):
         for species, genome in self.genomes.items():

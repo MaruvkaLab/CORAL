@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from .utils import log, run_cmd
@@ -52,6 +53,10 @@ class Pileup:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             raise RuntimeError(f"Failed to generate pileup: {e}")
+        
+        # Save species mapping for reference
+        #with open(os.path.join(self.output_dir, "pileup_species_mapping.json"), 'w') as f:
+        #    json.dump(self.taxon_names, f, indent=2)
 
         return self.pileup_path
 

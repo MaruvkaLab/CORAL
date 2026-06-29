@@ -24,8 +24,8 @@ class MultipleSpeciesMutationExtractor:
         if self.mapping is None:
             raise ValueError("Dictionary mapping taxa names must be provided.")
         
-        with open(os.path.join(self.output_dir, "species_mapping.json"), 'w') as f:
-            json.dump(self.mapping, f, indent=2)
+        #with open(os.path.join(self.output_dir, "species_mapping.json"), 'w') as f:
+        #    json.dump(self.mapping, f, indent=2)
         
         os.makedirs(self.output_dir, exist_ok=True)
         self.plots_dir = os.path.join(self.output_dir, "Plots")
@@ -104,7 +104,8 @@ class MultipleSpeciesMutationExtractor:
 
     def extract(self):
         csv_path = os.path.join(self.output_dir, "matching_bases.csv.gz")
-        header = ["chromosome", "position", "left", "right"] + [f"taxa{i}" for i in range(self.n_species)]
+        #####header = ["chromosome", "position", "left", "right"] + [f"taxa{i}" for i in range(self.n_species)]
+        header = ["chromosome", "position", "left", "right"] + [f"taxa{k}" for k in self.mapping if isinstance(k, int)]
 
         if os.path.exists(csv_path) and not self.no_cache:
             log(f'Using cached matching positions from csv at {csv_path}', self.verbose)
