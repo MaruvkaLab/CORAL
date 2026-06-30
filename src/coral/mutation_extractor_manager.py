@@ -147,11 +147,27 @@ class MutationExtractor:
             
         return t1_mut, t2_mut, t1_3mer, t2_3mer
 
+    '''
     @staticmethod
     def quality_check(fields):
         return fields and '*' not in fields[NUC_1_IDX] and '*' not in fields[NUC_2_IDX] and \
                MutationExtractor.all_same(fields[NUC_1_IDX].translate(REMOVE_CHARS)) and \
                MutationExtractor.all_same(fields[NUC_2_IDX].translate(REMOVE_CHARS))
+    '''
+    @staticmethod
+    def quality_check(fields):
+        if not fields:
+            return False
+        nuc1 = fields[NUC_1_IDX].translate(REMOVE_CHARS).replace(',', '.').lower()
+        nuc2 = fields[NUC_2_IDX].translate(REMOVE_CHARS).replace(',', '.').lower()
+        return (
+            '*' not in fields[NUC_1_IDX] and
+            '*' not in fields[NUC_2_IDX] and
+            int(fields[N_READS_1_IDX]) >= 3 and
+            int(fields[N_READS_2_IDX]) >= 3 and
+            MutationExtractor.all_same(nuc1) and
+            MutationExtractor.all_same(nuc2)
+        )
 
     @staticmethod
     def all_same(seq):
@@ -179,11 +195,27 @@ class FiveMerExtractor:
     def get_nuc(self, field):
         cleaned = field.translate(REMOVE_CHARS)
         return cleaned[0].upper() if cleaned else 'N'
-
+    '''
     def quality_check(self, fields):
         return fields and '*' not in fields[NUC_1_IDX] and '*' not in fields[NUC_2_IDX] and \
                self.all_same(fields[NUC_1_IDX].translate(REMOVE_CHARS)) and \
                self.all_same(fields[NUC_2_IDX].translate(REMOVE_CHARS))
+    '''
+
+    def quality_check(self, fields):
+        if not fields:
+            return False
+        nuc1 = fields[NUC_1_IDX].translate(REMOVE_CHARS).replace(',', '.').lower()
+        nuc2 = fields[NUC_2_IDX].translate(REMOVE_CHARS).replace(',', '.').lower()
+        return (
+            '*' not in fields[NUC_1_IDX] and
+            '*' not in fields[NUC_2_IDX] and
+            int(fields[N_READS_1_IDX]) >= 3 and
+            int(fields[N_READS_2_IDX]) >= 3 and
+            self.all_same(nuc1) and
+            self.all_same(nuc2)
+        )
+
 
     def all_same(self, seq):
         return len(seq) > 0 and all(b == seq[0] for b in seq)

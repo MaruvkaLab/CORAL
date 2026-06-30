@@ -33,7 +33,7 @@ class MultipleSpeciesMutationExtractor:
 
     def _all_same(self, seq):
         return len(seq) > 0 and all(ch == seq[0] for ch in seq)
-
+    '''
     def _quality_check(self, fields):
         sample_fields = fields[3:]
         return (
@@ -41,7 +41,23 @@ class MultipleSpeciesMutationExtractor:
             and all('*' not in field for field in sample_fields)
             and all(self._all_same(field.translate(str.maketrans('', '', '^$[]'))) for field in sample_fields)
         )
-    
+    '''
+
+    def _quality_check(self, fields):
+        if not fields:
+            return False
+        samples = fields[3:]  # each is (depth, bases)
+        for depth, bases in samples:
+            if '*' in bases:
+                return False
+            if int(depth) < 3:
+                return False
+            cleaned = bases.translate(str.maketrans('', '', '^$[]')).replace(',', '.').lower()
+            if not self._all_same(cleaned):
+                return False
+        return True
+
+    '''
     def _parse_line(self, line):
         parts = line.strip().split('\t')
         if len(parts) < self.n_species * 3:
@@ -50,7 +66,17 @@ class MultipleSpeciesMutationExtractor:
         base_calls = parts[4::3]
         normalized = [base[0] if base and base[0] not in {',', '.'} else ref_base for base in base_calls]
         return [chrom, pos, ref_base] + normalized
-
+    '''
+    def _parse_line(self, line):
+        parts = line.strip().split('\t')
+        if len(parts) < self.n_species * 3:
+            return None
+        chrom, pos, ref_base = parts[:3]
+        depths = parts[3::3]        # depth columns: 3, 6, 9, ...
+        base_calls = parts[4::3]    # base columns:  4, 7, 10, ...
+        return [chrom, pos, ref_base] + list(zip(depths, base_calls))
+    
+    '''
     def _detect_mutations(self, buffer):
         triplets = [fields[3:] for fields in buffer]
         prev_bases, curr_bases, next_bases = triplets
@@ -61,6 +87,28 @@ class MultipleSpeciesMutationExtractor:
                 prev_bases[0].upper(),
                 next_bases[0].upper(),
                 buffer[1][2].upper()
+            ] + [b.upper() for b in curr_bases]
+        return None
+    '''
+    def _detect_mutations(self, buffer):
+        def normalize(fields, ref_base):
+            return [
+                b[0] if b and b[0] not in {',', '.'} else ref_base   # ← normalization moved here
+                for _, b in fields[3:]                                  # ← unpack (depth, bases)
+            ]
+
+        ref_base = buffer[1][2]
+        prev_bases = normalize(buffer[0], buffer[0][2])
+        curr_bases = normalize(buffer[1], ref_base)
+        next_bases = normalize(buffer[2], buffer[2][2])
+
+        if self._all_same(prev_bases) and self._all_same(next_bases) and len(set(curr_bases)) > 1:
+            return [
+                buffer[1][0],  # chrom
+                buffer[1][1],  # pos
+                prev_bases[0].upper(),
+                next_bases[0].upper(),
+                ref_base.upper()
             ] + [b.upper() for b in curr_bases]
         return None
 
