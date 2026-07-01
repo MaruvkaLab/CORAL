@@ -522,24 +522,25 @@ if __name__ == "__main__":
     pipeline.run()
 
     # newick_tree = "(((Drosophila_sechellia|GCF_004382195.2,Drosophila_melanogaster|GCF_000001215.4),Drosophila_mauritiana|GCF_004382145.1),Drosophila_santomea|GCF_016746245.2);"
+    """
+    run_id = 'drosophila2_run_mutiple_species'
+    pipeline = MultiSpeciesMutationPipeline(newick_tree,
+                                            base_output_dir="../Output_OO",
+                                            run_id=run_id,
+                                            outgroup='Drosophila_santomea')
+    """
+    """
+    species_list = [('Drosophila_sechellia','GCF_004382195.2'),
+                    ('Drosophila_melanogaster','GCF_000001215.4'),
+                    ('Drosophila_mauritiana', 'GCF_004382145.1'), 
+                    ('Drosophila_santomea','GCF_016746245.2')]
 
-    # run_id = 'drosophila2_run_mutiple_species'
-    # pipeline = MultiSpeciesMutationPipeline(newick_tree,
-    #     base_output_dir="../Output_OO",
-    #     run_id=run_id,
-    #     outgroup='Drosophila_santomea')
-
-    # species_list = [('Drosophila_sechellia','GCF_004382195.2'),
-    #                ('Drosophila_melanogaster','GCF_000001215.4'),
-    #                ('Drosophila_mauritiana', 'GCF_004382145.1'), 
-    #                ('Drosophila_santomea','GCF_016746245.2')]
-
-    # run_id = 'drosophila1_run_mutiple_species'
-    # pipeline = MultiSpeciesMutationPipeline(species_list=species_list,
-    #     base_output_dir="../Output_OO",
-    #     run_id=run_id,
-    #     outgroup='Drosophila_santomea')
+    run_id = 'drosophila1_run_mutiple_species'
+    pipeline = MultiSpeciesMutationPipeline(species_list=species_list,
+                                            base_output_dir="../Output_OO",
+                                            run_id=run_id,
+                                            outgroup='Drosophila_santomea')
     
     pipeline.run()
-
+    """
 

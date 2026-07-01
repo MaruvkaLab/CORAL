@@ -1,15 +1,116 @@
 import os
 import gzip
 import json
-import csv
+import re
 from collections import defaultdict
 
-from .utils import log
+try:
+    from .utils import log
+except ImportError:
+    def log(message, verbose=True):
+        if verbose:
+            print(message)
 
-REMOVE_CHARS = str.maketrans('', '', '^$[]')
+import pandas as pd
+
 CHR_IDX, POSITION_IDX, REF_NUC_IDX, N_READS_1_IDX, NUC_1_IDX, N_READS_2_IDX, NUC_2_IDX = range(7)
 PREV_IDX, CUR_IDX, NEXT_IDX = 0, 1, 2
 REF_IDX, TAXA1_IDX, TAXA2_IDX = 0, 1, 2
+FLANK = 2
+MIN_DEPTH = 1  # Minimum depth threshold for quality check
+
+# Matches read-start (^ + mapQ char), read-end ($), or an indel marker (+N / -N).
+# Digits are captured so the N following indel bases can be skipped in one pass.
+_CLEAN_RE = re.compile(r'\^.|\$|[+-](\d*)')
+
+
+def clean_bases(s):
+    """Strip read-start/end markers and indel notation from an mpileup bases field.
+
+    Single regex scan instead of a per-character Python loop: for the common
+    case (no indels/read boundaries at this position) finditer finds nothing
+    and this degrades to one slice, at roughly C speed.
+    """
+    out = []
+    pos = 0
+    for m in _CLEAN_RE.finditer(s):
+        if m.start() < pos:
+            continue  # falls inside a just-skipped indel run; can't happen in valid pileup syntax
+        out.append(s[pos:m.start()])
+        digits = m.group(1)
+        if digits is not None:
+            pos = m.end() + (int(digits) if digits else 0)
+        else:
+            pos = m.end()
+    out.append(s[pos:])
+    return ''.join(out)
+
+
+class PileupLine:
+    """Wraps one parsed pileup row. Caches clean_bases() per field index so
+    quality_check and context extraction never clean the same field twice."""
+    __slots__ = ('fields', '_clean')
+
+    def __init__(self, fields):
+        self.fields = fields
+        self._clean = {}
+
+    def __getitem__(self, idx):
+        return self.fields[idx]
+
+    def clean(self, idx):
+        cached = self._clean.get(idx)
+        if cached is None:
+            cached = clean_bases(self.fields[idx])
+            self._clean[idx] = cached
+        return cached
+
+    def nuc(self, idx):
+        cleaned = self.clean(idx)
+        return cleaned[0].upper() if cleaned else 'N'
+
+
+def parse_line(line):
+    parts = line.strip().split('\t')
+    if len(parts) < 9:
+        return None
+    return PileupLine(parts[:5] + parts[6:-1])
+
+
+def all_same(seq):
+    return len(seq) > 0 and all(ch == seq[0] for ch in seq)
+
+
+def quality_check(line):
+    if line is None:
+        return False
+    fields = line.fields
+    if '*' in fields[NUC_1_IDX] or '*' in fields[NUC_2_IDX]:
+        return False
+    if int(fields[N_READS_1_IDX]) < MIN_DEPTH or int(fields[N_READS_2_IDX]) < MIN_DEPTH:
+        return False
+    nuc1 = line.clean(NUC_1_IDX).replace(',', '.').lower()
+    nuc2 = line.clean(NUC_2_IDX).replace(',', '.').lower()
+    return all_same(nuc1) and all_same(nuc2)
+
+
+def consecutive(*lines):
+    chrom = lines[0][CHR_IDX]
+    positions = [int(line[POSITION_IDX]) for line in lines]
+    return (all(line[CHR_IDX] == chrom for line in lines)
+            and all(positions[i] + 1 == positions[i + 1] for i in range(len(positions) - 1)))
+
+
+def extract_context(lines):
+    sequences = [[], [], []]
+    for line in lines:
+        ref_nuc = line.nuc(REF_NUC_IDX)
+        nuc1 = line.nuc(NUC_1_IDX)
+        nuc2 = line.nuc(NUC_2_IDX)
+        sequences[REF_IDX].append(ref_nuc)
+        sequences[TAXA1_IDX].append(ref_nuc if nuc1 in {',', '.'} else nuc1)
+        sequences[TAXA2_IDX].append(ref_nuc if nuc2 in {',', '.'} else nuc2)
+    return sequences
 
 
 class MutationExtractor:
@@ -25,7 +126,6 @@ class MutationExtractor:
         self.no_cache = no_cache
         self.verbose = verbose
 
-        self.pileup_file = pileup_file
         self.out_json1 = os.path.join(self.mutation_output_dir, f"{taxon1}__{taxon2}__{reference}__mutations.json")
         self.out_json2 = os.path.join(self.mutation_output_dir, f"{taxon2}__{taxon1}__{reference}__mutations.json")
         self.trip_out_json1 = os.path.join(self.triplet_output_dir, f"{self.taxon1}__{self.taxon2}__{self.reference}__triplets.json")
@@ -40,7 +140,7 @@ class MutationExtractor:
 
         jsons_exist = all(os.path.exists(p) for p in [self.out_json1, self.out_json2, self.trip_out_json1, self.trip_out_json2])
         csvs_exist = (self.no_full_mutations or
-                    all(os.path.exists(p) for p in [self.csv_path1, self.csv_path2]))
+                      all(os.path.exists(p) for p in [self.csv_path1, self.csv_path2]))
 
         if not self.no_cache and jsons_exist and csvs_exist:
             log("Mutation counts already exist. Skipping.", self.verbose)
@@ -56,38 +156,38 @@ class MutationExtractor:
             header = "chromosome,position,mutation\n"
             csv1 = gzip.open(self.csv_path1, 'wt')
             csv1.write(header)
-
             csv2 = gzip.open(self.csv_path2, 'wt')
             csv2.write(header)
 
         with gzip.open(self.pileup_file, 'rt') as f:
-
-            line_fields = [None, self.parse_line(f.readline()), self.parse_line(f.readline())]
-            qc_flags = [False, self.quality_check(line_fields[1]), self.quality_check(line_fields[2])]
+            line_fields = [None, parse_line(f.readline()), parse_line(f.readline())]
+            qc_flags = [False, quality_check(line_fields[1]), quality_check(line_fields[2])]
 
             for line in f:
-                line_fields = [line_fields[1], line_fields[2], self.parse_line(line)]
-                qc_flags = [qc_flags[1], qc_flags[2], self.quality_check(line_fields[2])]
+                line_fields = [line_fields[1], line_fields[2], parse_line(line)]
+                qc_flags = [qc_flags[1], qc_flags[2], quality_check(line_fields[2])]
 
-                if all(qc_flags):
-                    triplets = self.extract_triplets(line_fields)
+                if all(qc_flags) and consecutive(*line_fields):
+                    triplets = extract_context(line_fields)
                     mut1, mut2, trip1, trip2 = self.detect_mutation_triplet(triplets)
                     chrom = line_fields[1][CHR_IDX]
                     pos = int(line_fields[1][POSITION_IDX])
 
                     if mut1:
                         species_mut1[mut1] += 1
-                        csv1.write(f"{chrom},{pos},{mut1}\n")
+                        if csv1:
+                            csv1.write(f"{chrom},{pos},{mut1}\n")
 
                     if mut2:
                         species_mut2[mut2] += 1
-                        csv2.write(f"{chrom},{pos},{mut2}\n")
+                        if csv2:
+                            csv2.write(f"{chrom},{pos},{mut2}\n")
 
                     if trip1:
                         species_triplet1[trip1] += 1
                     if trip2:
                         species_triplet2[trip2] += 1
-        
+
         if csv1:
             csv1.close()
         if csv2:
@@ -97,7 +197,7 @@ class MutationExtractor:
             json.dump(species_mut1, f, indent=2)
         with open(self.out_json2, 'w') as f:
             json.dump(species_mut2, f, indent=2)
-        
+
         with open(self.trip_out_json1, 'w') as f:
             json.dump(species_triplet1, f, indent=2)
         with open(self.trip_out_json2, 'w') as f:
@@ -105,28 +205,6 @@ class MutationExtractor:
 
         log(f"Saved mutation counts to {self.out_json1} and {self.out_json2}", self.verbose)
         log(f"Saved triplet counts to {self.trip_out_json1} and {self.trip_out_json2}", self.verbose)
-
-
-    @staticmethod
-    def parse_line(line):
-        parts = line.strip().split('\t')
-        return parts[:5] + parts[6:-1] if len(parts) >= 9 else None
-
-    @staticmethod
-    def get_nuc(nuc_field):
-        cleaned = nuc_field.translate(REMOVE_CHARS)
-        return cleaned[0].upper() if cleaned else 'N'
-
-    def extract_triplets(self, fields_list):
-        context = [[], [], []]
-        for fields in fields_list:
-            ref_nuc = self.get_nuc(fields[REF_NUC_IDX])
-            nuc1 = self.get_nuc(fields[NUC_1_IDX])
-            nuc2 = self.get_nuc(fields[NUC_2_IDX])
-            context[REF_IDX].append(ref_nuc)
-            context[TAXA1_IDX].append(nuc1 if nuc1 not in {',', '.'} else ref_nuc)
-            context[TAXA2_IDX].append(nuc2 if nuc2 not in {',', '.'} else ref_nuc)
-        return context
 
     def detect_mutation_triplet(self, triplets):
         t1_mut = t2_mut = t1_3mer = t2_3mer = None
@@ -144,37 +222,9 @@ class MutationExtractor:
                 t1_3mer, t2_3mer = context, context
             elif ref_base == triplets[TAXA2_IDX][CUR_IDX] == triplets[TAXA1_IDX][CUR_IDX]:
                 t1_3mer, t2_3mer = context, context
-            
+
         return t1_mut, t2_mut, t1_3mer, t2_3mer
 
-    '''
-    @staticmethod
-    def quality_check(fields):
-        return fields and '*' not in fields[NUC_1_IDX] and '*' not in fields[NUC_2_IDX] and \
-               MutationExtractor.all_same(fields[NUC_1_IDX].translate(REMOVE_CHARS)) and \
-               MutationExtractor.all_same(fields[NUC_2_IDX].translate(REMOVE_CHARS))
-    '''
-    @staticmethod
-    def quality_check(fields):
-        if not fields:
-            return False
-        nuc1 = fields[NUC_1_IDX].translate(REMOVE_CHARS).replace(',', '.').lower()
-        nuc2 = fields[NUC_2_IDX].translate(REMOVE_CHARS).replace(',', '.').lower()
-        return (
-            '*' not in fields[NUC_1_IDX] and
-            '*' not in fields[NUC_2_IDX] and
-            int(fields[N_READS_1_IDX]) >= 3 and
-            int(fields[N_READS_2_IDX]) >= 3 and
-            MutationExtractor.all_same(nuc1) and
-            MutationExtractor.all_same(nuc2)
-        )
-
-    @staticmethod
-    def all_same(seq):
-        return len(seq) > 0 and all(ch == seq[0] for ch in seq)
-
-
-FLANK = 2
 
 class FiveMerExtractor:
     def __init__(self, reference, taxon1, taxon2, pileup_file, output_dir, no_cache=False, verbose=True):
@@ -187,51 +237,6 @@ class FiveMerExtractor:
         self.no_cache = no_cache
         self.verbose = verbose
         os.makedirs(output_dir, exist_ok=True)
-
-    def parse_line(self, line):
-        parts = line.strip().split('\t')
-        return parts[:5] + parts[6:-1] if len(parts) >= 9 else None
-
-    def get_nuc(self, field):
-        cleaned = field.translate(REMOVE_CHARS)
-        return cleaned[0].upper() if cleaned else 'N'
-    '''
-    def quality_check(self, fields):
-        return fields and '*' not in fields[NUC_1_IDX] and '*' not in fields[NUC_2_IDX] and \
-               self.all_same(fields[NUC_1_IDX].translate(REMOVE_CHARS)) and \
-               self.all_same(fields[NUC_2_IDX].translate(REMOVE_CHARS))
-    '''
-
-    def quality_check(self, fields):
-        if not fields:
-            return False
-        nuc1 = fields[NUC_1_IDX].translate(REMOVE_CHARS).replace(',', '.').lower()
-        nuc2 = fields[NUC_2_IDX].translate(REMOVE_CHARS).replace(',', '.').lower()
-        return (
-            '*' not in fields[NUC_1_IDX] and
-            '*' not in fields[NUC_2_IDX] and
-            int(fields[N_READS_1_IDX]) >= 3 and
-            int(fields[N_READS_2_IDX]) >= 3 and
-            self.all_same(nuc1) and
-            self.all_same(nuc2)
-        )
-
-
-    def all_same(self, seq):
-        return len(seq) > 0 and all(b == seq[0] for b in seq)
-
-    def extract_5mer(self, fields_list):
-        sequences = [[], [], []]
-        for fields in fields_list:
-            ref_nuc = self.get_nuc(fields[REF_NUC_IDX])
-            nuc1 = self.get_nuc(fields[NUC_1_IDX])
-            nuc2 = self.get_nuc(fields[NUC_2_IDX])
-            nuc1 = ref_nuc if nuc1 in {',', '.'} else nuc1
-            nuc2 = ref_nuc if nuc2 in {',', '.'} else nuc2
-            sequences[REF_IDX].append(ref_nuc)
-            sequences[TAXA1_IDX].append(nuc1)
-            sequences[TAXA2_IDX].append(nuc2)
-        return sequences
 
     def detect_mutation_5mer(self, five_mers):
         flank_indices = [0, 1, 3, 4]
@@ -249,26 +254,25 @@ class FiveMerExtractor:
 
     def extract(self):
         if all(os.path.exists(p) for p in [self.json1_path, self.json2_path]) and not self.no_cache:
-            if self.verbose:
-                log("5-mer mutation files exist. Skipping.", self.verbose)
+            log("5-mer mutation files exist. Skipping.", self.verbose)
             return self.json1_path, self.json2_path
 
         species_mut1 = defaultdict(int)
         species_mut2 = defaultdict(int)
 
         with gzip.open(self.pileup_file, 'rt') as f:
-            window = [None] * (2 * FLANK + 1)
-            qc = [False] * (2 * FLANK + 1)
+            line_fields = [None] * (2 * FLANK + 1)
+            qc_flags = [False] * (2 * FLANK + 1)
             for i in range(2 * FLANK):
-                window[i] = self.parse_line(f.readline())
-                qc[i] = self.quality_check(window[i])
+                line_fields[i] = parse_line(f.readline())
+                qc_flags[i] = quality_check(line_fields[i])
 
             for line in f:
-                window = window[1:] + [self.parse_line(line)]
-                qc = qc[1:] + [self.quality_check(window[-1])]
+                line_fields = line_fields[1:] + [parse_line(line)]
+                qc_flags = qc_flags[1:] + [quality_check(line_fields[-1])]
 
-                if all(qc):
-                    five_mers = self.extract_5mer(window)
+                if all(qc_flags) and consecutive(*line_fields):
+                    five_mers = extract_context(line_fields)
                     mut1, mut2 = self.detect_mutation_5mer(five_mers)
                     if mut1:
                         species_mut1[mut1] += 1
@@ -283,7 +287,7 @@ class FiveMerExtractor:
         log(f"Written: {self.json1_path}, {self.json2_path}", self.verbose)
 
         return self.json1_path, self.json2_path
-    
+
 
 class TripletExtractor:
     def __init__(self, reference, taxon1, taxon2, pileup_file, output_dir, no_cache=False, verbose=True):
@@ -297,8 +301,6 @@ class TripletExtractor:
 
         os.makedirs(self.output_dir, exist_ok=True)
 
-        self.pileup_file = pileup_file
-
         self.out_json1 = os.path.join(
             self.output_dir, f"{self.taxon1}__{self.taxon2}__{self.reference}__triplets.json"
         )
@@ -306,43 +308,13 @@ class TripletExtractor:
             self.output_dir, f"{self.taxon2}__{self.taxon1}__{self.reference}__triplets.json"
         )
 
-    def all_same(self, seq):
-        return len(seq) > 0 and all(ch == seq[0] for ch in seq)
-
-    def get_nuc(self, field):
-        cleaned = field.translate(REMOVE_CHARS)
-        return cleaned[0].upper() if cleaned else 'N'
-
-    def parse_line(self, line):
-        parts = line.strip().split('\t')
-        return parts[:5] + parts[6:-1] if len(parts) >= 9 else None
-
-    def passes_qc(self, fields):
-        return fields is not None and \
-               '*' not in fields[NUC_1_IDX] and '*' not in fields[NUC_2_IDX] and \
-               self.all_same(fields[NUC_1_IDX].translate(REMOVE_CHARS)) and \
-               self.all_same(fields[NUC_2_IDX].translate(REMOVE_CHARS))
-
     def relevant_triplet(self, triplets):
         if triplets[REF_IDX][PREV_IDX] == triplets[TAXA1_IDX][PREV_IDX] == triplets[TAXA2_IDX][PREV_IDX] and \
-        triplets[REF_IDX][NEXT_IDX] == triplets[TAXA1_IDX][NEXT_IDX] == triplets[TAXA2_IDX][NEXT_IDX]:
+           triplets[REF_IDX][NEXT_IDX] == triplets[TAXA1_IDX][NEXT_IDX] == triplets[TAXA2_IDX][NEXT_IDX]:
             if triplets[REF_IDX][CUR_IDX] == triplets[TAXA1_IDX][CUR_IDX] or \
-                triplets[REF_IDX][CUR_IDX] == triplets[TAXA2_IDX][CUR_IDX]:
+               triplets[REF_IDX][CUR_IDX] == triplets[TAXA2_IDX][CUR_IDX]:
                 return True
         return False
-
-    def extract_triplets(self, line_fields):
-        sequences = [[], [], []]
-        for fields in line_fields:
-            ref_nuc = self.get_nuc(fields[REF_NUC_IDX])
-            nuc1 = self.get_nuc(fields[NUC_1_IDX])
-            nuc2 = self.get_nuc(fields[NUC_2_IDX])
-            nuc1 = ref_nuc if nuc1 in {',', '.'} else nuc1
-            nuc2 = ref_nuc if nuc2 in {',', '.'} else nuc2
-            sequences[REF_IDX].append(ref_nuc)
-            sequences[TAXA1_IDX].append(nuc1)
-            sequences[TAXA2_IDX].append(nuc2)
-        return sequences
 
     def extract(self):
         if all(os.path.exists(p) for p in [self.out_json1, self.out_json2]) and not self.no_cache:
@@ -353,17 +325,15 @@ class TripletExtractor:
         triplet_dict2 = defaultdict(int)
 
         with gzip.open(self.pileup_file, 'rt') as f:
-            line_fields = [None, self.parse_line(f.readline()), self.parse_line(f.readline())]
-            qc_flags = [False, self.passes_qc(line_fields[1]), self.passes_qc(line_fields[2])]
+            line_fields = [None, parse_line(f.readline()), parse_line(f.readline())]
+            qc_flags = [False, quality_check(line_fields[1]), quality_check(line_fields[2])]
 
             for line in f:
-                line_fields = [line_fields[CUR_IDX], line_fields[NEXT_IDX], self.parse_line(line)]
-                qc_flags = [qc_flags[CUR_IDX], qc_flags[NEXT_IDX], self.passes_qc(line_fields[NEXT_IDX])]
+                line_fields = [line_fields[1], line_fields[2], parse_line(line)]
+                qc_flags = [qc_flags[1], qc_flags[2], quality_check(line_fields[2])]
 
-                if all(qc_flags):
-                    triplets = self.extract_triplets(line_fields)
-                    # triplet_dict1[''.join(triplets[TAXA1_IDX])] += 1
-                    # triplet_dict2[''.join(triplets[TAXA2_IDX])] += 1
+                if all(qc_flags) and consecutive(*line_fields):
+                    triplets = extract_context(line_fields)
                     if self.relevant_triplet(triplets):
                         triplet = ''.join(triplets[REF_IDX])
                         triplet_dict1[triplet] += 1
@@ -376,12 +346,6 @@ class TripletExtractor:
 
         log(f"Triplet dictionaries written to:\n  • {self.out_json1}\n  • {self.out_json2}", self.verbose)
 
-
-import os
-import json
-import re
-from collections import defaultdict
-import pandas as pd
 
 class MutationNormalizer:
     complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C'}
@@ -500,4 +464,3 @@ class MutationNormalizer:
             log("Estimated mutation rates per site per year:", self.verbose)
             for col in mutation_rates.index:
                 log(f"{col.split('__')[0]}: {mutation_rates[col]:.2e}", self.verbose)
-

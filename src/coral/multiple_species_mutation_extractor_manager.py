@@ -1,12 +1,63 @@
 import csv
 import os
 import gzip
-import json
 from collections import defaultdict
 import pandas as pd
 from .multiple_species_utils import annotate_tree_with_indices, save_annotated_tree, collapse_mutations, filter_mutations_dict
 from .plot_utils import MutationSpectraPlotter
 from .utils import log
+import re
+
+MIN_DEPTH = 1  # Minimum depth threshold for quality check
+
+# Matches read-start (^ + mapQ char), read-end ($), or an indel marker (+N / -N).
+# Digits are captured so the N following indel bases can be skipped in one pass.
+_CLEAN_RE = re.compile(r'\^.|\$|[+-](\d*)')
+
+
+def clean_bases(s):
+    """Strip read-start/end markers and indel notation from an mpileup bases field.
+
+    Single regex scan instead of a per-character Python loop: for the common
+    case (no indels/read boundaries at this position) finditer finds nothing
+    and this degrades to one slice, at roughly C speed.
+    """
+    out = []
+    pos = 0
+    for m in _CLEAN_RE.finditer(s):
+        if m.start() < pos:
+            continue  # falls inside a just-skipped indel run; can't happen in valid pileup syntax
+        out.append(s[pos:m.start()])
+        digits = m.group(1)
+        if digits is not None:
+            pos = m.end() + (int(digits) if digits else 0)
+        else:
+            pos = m.end()
+    out.append(s[pos:])
+    return ''.join(out)
+
+
+class ParsedLine(list):
+    """A parsed pileup row: [chrom, pos, ref, (depth, bases), (depth, bases), ...].
+    Subclasses list (not composes over it) so fields[0]/fields[3:]/etc. stay
+    native C-level list indexing — no per-access Python method-call overhead.
+    Adds one thing: clean_sample(i) caches clean_bases() per sample so QC and
+    mutation detection never clean the same bases string twice. A line can
+    appear in up to three sliding-window triplets, so without caching it
+    could get re-cleaned 3-4x over."""
+    __slots__ = ('_clean',)
+
+    def __init__(self, chrom, pos, ref_base, samples):
+        super().__init__([chrom, pos, ref_base] + samples)
+        self._clean = [None] * len(samples)
+
+    def clean_sample(self, sample_idx):
+        cached = self._clean[sample_idx]
+        if cached is None:
+            _, bases = self[3 + sample_idx]
+            cached = clean_bases(bases)
+            self._clean[sample_idx] = cached
+        return cached
 
 
 class MultipleSpeciesMutationExtractor:
@@ -23,79 +74,48 @@ class MultipleSpeciesMutationExtractor:
             raise ValueError("Either newick_tree or species_list must be provided.")
         if self.mapping is None:
             raise ValueError("Dictionary mapping taxa names must be provided.")
-        
-        #with open(os.path.join(self.output_dir, "species_mapping.json"), 'w') as f:
-        #    json.dump(self.mapping, f, indent=2)
-        
+
         os.makedirs(self.output_dir, exist_ok=True)
         self.plots_dir = os.path.join(self.output_dir, "Plots")
         self.csv_dir = os.path.join(self.output_dir, "CSVs")
 
     def _all_same(self, seq):
-        return len(seq) > 0 and all(ch == seq[0] for ch in seq)
-    '''
-    def _quality_check(self, fields):
-        sample_fields = fields[3:]
-        return (
-            sample_fields
-            and all('*' not in field for field in sample_fields)
-            and all(self._all_same(field.translate(str.maketrans('', '', '^$[]'))) for field in sample_fields)
-        )
-    '''
+        # count() runs its comparison loop in C; a generator + all() pays
+        # per-element Python-level overhead for what is otherwise a tight scan.
+        return len(seq) > 0 and seq.count(seq[0]) == len(seq)
+
+    def _parse_line(self, line):
+        parts = line.strip().split('\t')
+        if len(parts) < self.n_species * 3:
+            return None
+        chrom, pos, ref_base = parts[:3]
+        depths = parts[3::3]
+        base_calls = parts[4::3]
+        return ParsedLine(chrom, pos, ref_base, list(zip(depths, base_calls)))
 
     def _quality_check(self, fields):
         if not fields:
             return False
-        samples = fields[3:]  # each is (depth, bases)
-        for depth, bases in samples:
+        samples = fields[3:]
+        for i, (depth, bases) in enumerate(samples):
             if '*' in bases:
                 return False
-            if int(depth) < 3:
+            if int(depth) < MIN_DEPTH:
                 return False
-            cleaned = bases.translate(str.maketrans('', '', '^$[]')).replace(',', '.').lower()
+            cleaned = fields.clean_sample(i).replace(',', '.').lower()
             if not self._all_same(cleaned):
                 return False
         return True
 
-    '''
-    def _parse_line(self, line):
-        parts = line.strip().split('\t')
-        if len(parts) < self.n_species * 3:
-            return None
-        chrom, pos, ref_base = parts[:3]
-        base_calls = parts[4::3]
-        normalized = [base[0] if base and base[0] not in {',', '.'} else ref_base for base in base_calls]
-        return [chrom, pos, ref_base] + normalized
-    '''
-    def _parse_line(self, line):
-        parts = line.strip().split('\t')
-        if len(parts) < self.n_species * 3:
-            return None
-        chrom, pos, ref_base = parts[:3]
-        depths = parts[3::3]        # depth columns: 3, 6, 9, ...
-        base_calls = parts[4::3]    # base columns:  4, 7, 10, ...
-        return [chrom, pos, ref_base] + list(zip(depths, base_calls))
-    
-    '''
-    def _detect_mutations(self, buffer):
-        triplets = [fields[3:] for fields in buffer]
-        prev_bases, curr_bases, next_bases = triplets
-        if self._all_same(prev_bases) and self._all_same(next_bases) and len(set(curr_bases)) > 1:
-            return [
-                buffer[1][0],  # chrom
-                buffer[1][1],  # pos
-                prev_bases[0].upper(),
-                next_bases[0].upper(),
-                buffer[1][2].upper()
-            ] + [b.upper() for b in curr_bases]
-        return None
-    '''
     def _detect_mutations(self, buffer):
         def normalize(fields, ref_base):
-            return [
-                b[0] if b and b[0] not in {',', '.'} else ref_base   # ← normalization moved here
-                for _, b in fields[3:]                                  # ← unpack (depth, bases)
-            ]
+            rb = ref_base.upper()
+            out = []
+            for i in range(len(fields[3:])):
+                cleaned = fields.clean_sample(i)
+                c = cleaned[0].upper() if cleaned else ''
+                out.append(rb if (not c or c in {',', '.'}) else c)
+            return out
 
         ref_base = buffer[1][2]
         prev_bases = normalize(buffer[0], buffer[0][2])
@@ -104,8 +124,8 @@ class MultipleSpeciesMutationExtractor:
 
         if self._all_same(prev_bases) and self._all_same(next_bases) and len(set(curr_bases)) > 1:
             return [
-                buffer[1][0],  # chrom
-                buffer[1][1],  # pos
+                buffer[1][0], # chrom
+                buffer[1][1], # pos
                 prev_bases[0].upper(),
                 next_bases[0].upper(),
                 ref_base.upper()
@@ -150,9 +170,14 @@ class MultipleSpeciesMutationExtractor:
             return self._recursive_fitch(tree_root, list(root_state)[0], row, mutation_dict, 0)
         return mutation_dict, 1
 
+    def _consecutive(self, *lines):
+        chrom = lines[0][0]                       # index 0 = chrom
+        positions = [int(f[1]) for f in lines]    # index 1 = pos
+        return (all(f[0] == chrom for f in lines)
+                and all(positions[i] + 1 == positions[i + 1] for i in range(len(positions) - 1)))
+
     def extract(self):
         csv_path = os.path.join(self.output_dir, "matching_bases.csv.gz")
-        #####header = ["chromosome", "position", "left", "right"] + [f"taxa{i}" for i in range(self.n_species)]
         header = ["chromosome", "position", "left", "right"] + [f"taxa{k}" for k in self.mapping if isinstance(k, int)]
 
         if os.path.exists(csv_path) and not self.no_cache:
@@ -169,7 +194,7 @@ class MultipleSpeciesMutationExtractor:
                     for line in infile:
                         buffer = [buffer[1], buffer[2], self._parse_line(line)]
                         qc_flags = [qc_flags[1], qc_flags[2], self._quality_check(buffer[2])]
-                        if all(qc_flags):
+                        if all(qc_flags) and self._consecutive(*buffer):
                             result = self._detect_mutations(buffer)
                             if result:
                                 writer.writerow(result)
@@ -204,4 +229,3 @@ class MultipleSpeciesMutationExtractor:
 
         spectra_df = pd.DataFrame(spectra_dict)
         spectra_df.to_csv(os.path.join(self.output_dir, "mutation_spectras.tsv"), sep="\t")
-
