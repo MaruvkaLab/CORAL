@@ -85,7 +85,9 @@ def quality_check(line):
     if line is None:
         return False
     fields = line.fields
-    if '*' in fields[NUC_1_IDX] or '*' in fields[NUC_2_IDX]:
+    if '*' in fields[NUC_1_IDX] or '*' in fields[NUC_2_IDX]: # deletions
+        return False
+    if '+' in fields[NUC_1_IDX] or '+' in fields[NUC_2_IDX]: # insertions
         return False
     if int(fields[N_READS_1_IDX]) < MIN_DEPTH or int(fields[N_READS_2_IDX]) < MIN_DEPTH:
         return False

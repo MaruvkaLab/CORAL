@@ -98,7 +98,9 @@ class MultipleSpeciesMutationExtractor:
             return False
         samples = fields[3:]
         for i, (depth, bases) in enumerate(samples):
-            if '*' in bases:
+            if '*' in bases: # deletions
+                return False
+            if '+' in bases: # insertions
                 return False
             if int(depth) < MIN_DEPTH:
                 return False
@@ -106,7 +108,8 @@ class MultipleSpeciesMutationExtractor:
             if not self._all_same(cleaned):
                 return False
         return True
-
+    
+    """
     def _detect_mutations(self, buffer):
         def normalize(fields, ref_base):
             rb = ref_base.upper()
@@ -131,7 +134,35 @@ class MultipleSpeciesMutationExtractor:
                 ref_base.upper()
             ] + [b.upper() for b in curr_bases]
         return None
+    """
 
+    def _detect_mutations(self, buffer):
+        def normalize(fields, ref_base):
+            rb = ref_base.upper()
+            out = []
+            for i in range(len(fields[3:])):
+                cleaned = fields.clean_sample(i)
+                c = cleaned[0].upper() if cleaned else ''
+                out.append(rb if (not c or c in {',', '.'}) else c)
+            return out
+
+        def matches_ref(fields):
+            rb = fields[2].upper()
+            return all(b == rb for b in normalize(fields, rb))
+
+        ref_base = buffer[1][2]
+        curr_bases = normalize(buffer[1], ref_base)
+
+        if matches_ref(buffer[0]) and matches_ref(buffer[2]) and len(set(curr_bases)) > 1:
+            return [
+                buffer[1][0],  # chrom
+                buffer[1][1],  # pos
+                buffer[0][2].upper(),  # left context = prev line's ref base
+                buffer[2][2].upper(),  # right context = next line's ref base
+                ref_base.upper()
+            ] + [b.upper() for b in curr_bases]
+        return None
+    
     def _recursive_state_check(self, node, row):
         if node.is_leaf():
             node.add_feature("state", {row[f"taxa{self.mapping[node.name]}"]})

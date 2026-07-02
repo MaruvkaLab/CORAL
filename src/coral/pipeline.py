@@ -517,12 +517,25 @@ if __name__ == "__main__":
         aligner="bwa",
         base_output_dir="../Output_OO",
         mapq=60, 
-        suffix= 'MAPQ60'
+        suffix= 'MAPQ60',
+        cores=16
     )
     pipeline.run()
 
-    # newick_tree = "(((Drosophila_sechellia|GCF_004382195.2,Drosophila_melanogaster|GCF_000001215.4),Drosophila_mauritiana|GCF_004382145.1),Drosophila_santomea|GCF_016746245.2);"
+    species_list = [("Drosophila_pseudoobscura", "GCF_009870125.1"),
+                    ("Drosophila_miranda", "GCF_003369915.1"),
+                    ("Drosophila_helvetica", "GCA_963969585.1")]
+    run_id = 'drosophila1_run_mutiple_species'
+    pipeline = MultiSpeciesMutationPipeline(species_list=species_list,
+                                            base_output_dir="../Output_OO",
+                                            run_id=run_id,
+                                            outgroup='Drosophila_helvetica',
+                                            cores=16)
+    
+    pipeline.run()
     """
+    newick_tree = "(((Drosophila_sechellia|GCF_004382195.2,Drosophila_melanogaster|GCF_000001215.4),Drosophila_mauritiana|GCF_004382145.1),Drosophila_santomea|GCF_016746245.2);"
+    
     run_id = 'drosophila2_run_mutiple_species'
     pipeline = MultiSpeciesMutationPipeline(newick_tree,
                                             base_output_dir="../Output_OO",
