@@ -18,10 +18,14 @@ _CLEAN_RE = re.compile(r'\^.|\$|[+-](\d*)')
 def clean_bases(s):
     """Strip read-start/end markers and indel notation from an mpileup bases field.
 
-    Single regex scan instead of a per-character Python loop: for the common
-    case (no indels/read boundaries at this position) finditer finds nothing
-    and this degrades to one slice, at roughly C speed.
+    Fast path: every marker this removes (^x, $, +N…, -N…) contains one of the
+    four characters ^ $ + - . When none are present — the overwhelmingly common
+    case for CORAL's shallow pileups — the regex below matches nothing and would
+    return s unchanged, so we skip it entirely. Byte-for-byte identical to the
+    regex path but avoids the regex-engine call and list building.
     """
+    if '^' not in s and '$' not in s and '+' not in s and '-' not in s:
+        return s
     out = []
     pos = 0
     for m in _CLEAN_RE.finditer(s):

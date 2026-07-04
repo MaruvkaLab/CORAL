@@ -10,7 +10,7 @@ from .cleanup_manager import PipelineCleaner
 from .genome_manager import Genome
 from .alignment_manager import Aligner
 from .multiple_species_mutation_extractor_manager import MultipleSpeciesMutationExtractor
-from .mutation_extractor_manager import FiveMerExtractor, MutationExtractor, MutationNormalizer, TripletExtractor
+from .mutation_extractor_manager import FiveMerExtractor, MutationExtractor, MutationNormalizer, ParallelMutationExtractor, TripletExtractor
 from .pileup_manager import Pileup
 from .plot_utils import CoveragePlotter, MutationDensityPlotter, MutationSpectraPlotter
 from .utils import get_top_n_chromosomes, log
@@ -172,31 +172,67 @@ class MutationExtractionPipeline:
         )
         
         self.pileup = pileup_generator
-        
-        self.pileup_path = pileup_generator.generate()
+        self.pileup_path = pileup_generator.pileup_path
+
+        cores = self.params.get("cores")
+        parallel_extract = bool(cores) and cores > 1
+        # In parallel mode the extractor generates per-chromosome pileups directly
+        # from the indexed BAMs, so the whole-genome pileup is only needed for the
+        # serial scan or the (opt-in) 5-mer pass.
+        if not parallel_extract or self.params.get("five_mer", False):
+            self.pileup_path = pileup_generator.generate()
+        else:
+            log("Parallel extraction enabled: skipping whole-genome pileup "
+                "(per-chromosome pileups are generated during extraction).", self.verbose)
 
 
     def extract_mutations_and_triplets(self):
         # log("Extracting 3mer mutations and triplets from pileup...", self.verbose)
-        mutation_extractor = MutationExtractor(reference=self.reference.name,
-                              taxon1=self.genomes[0].name,
-                              taxon2=self.genomes[1].name,
-                              pileup_file=self.pileup_path,
-                              mutation_output_dir=os.path.join(self.output_dir, 'Mutations'),
-                              triplet_output_dir=os.path.join(self.output_dir, 'Triplets'),
-                              no_full_mutations=False,
-                              no_cache=False,
-                              verbose=self.verbose)
+        cores = self.params.get("cores")
+        mut_dir = os.path.join(self.output_dir, 'Mutations')
+        trip_dir = os.path.join(self.output_dir, 'Triplets')
+        # cores>1 -> chromosome-parallel extraction via per-chromosome mpileup
+        # (byte-identical output); otherwise the unchanged serial scan over the
+        # whole-genome pileup (no added overhead on a single core).
+        if cores and cores > 1:
+            mutation_extractor = ParallelMutationExtractor(
+                reference=self.reference.name,
+                taxon1=self.genomes[0].name,
+                taxon2=self.genomes[1].name,
+                ref_fasta=self.reference.fasta_path,
+                bams=[aligner.final_bam for aligner in self.alignments],
+                mutation_output_dir=mut_dir,
+                triplet_output_dir=trip_dir,
+                fai_path=self.reference.fasta_path + ".fai",
+                cores=cores,
+                no_full_mutations=False,
+                no_cache=False,
+                verbose=self.verbose)
+        else:
+            mutation_extractor = MutationExtractor(
+                reference=self.reference.name,
+                taxon1=self.genomes[0].name,
+                taxon2=self.genomes[1].name,
+                pileup_file=self.pileup_path,
+                mutation_output_dir=mut_dir,
+                triplet_output_dir=trip_dir,
+                no_full_mutations=False,
+                no_cache=False,
+                verbose=self.verbose)
         mutation_extractor.extract()
 
-        fivemer_extractor = FiveMerExtractor(reference=self.reference.name,
-                              taxon1=self.genomes[0].name,
-                              taxon2=self.genomes[1].name,
-                              pileup_file=self.pileup_path,
-                              output_dir=os.path.join(self.output_dir, 'Mutations'),
-                              no_cache=False,
-                              verbose=self.verbose)
-        fivemer_extractor.extract()
+        # 5-mer extraction is an extra full pass over the pileup and is not used
+        # by the standard (96-category, trinucleotide) outputs or normalization,
+        # so it is opt-in. Enable with five_mer=True (CLI: --five-mer).
+        if self.params.get("five_mer", False):
+            fivemer_extractor = FiveMerExtractor(reference=self.reference.name,
+                                  taxon1=self.genomes[0].name,
+                                  taxon2=self.genomes[1].name,
+                                  pileup_file=self.pileup_path,
+                                  output_dir=os.path.join(self.output_dir, 'Mutations'),
+                                  no_cache=False,
+                                  verbose=self.verbose)
+            fivemer_extractor.extract()
 
         # log("Extracting triplets from pileup...", self.verbose)
         # triplet_extractor = TripletExtractor(reference=self.reference.name,

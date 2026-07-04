@@ -2,6 +2,9 @@ import os
 import gzip
 import json
 import re
+import multiprocessing
+import subprocess
+from io import TextIOWrapper
 from collections import defaultdict
 
 try:
@@ -27,10 +30,14 @@ _CLEAN_RE = re.compile(r'\^.|\$|[+-](\d*)')
 def clean_bases(s):
     """Strip read-start/end markers and indel notation from an mpileup bases field.
 
-    Single regex scan instead of a per-character Python loop: for the common
-    case (no indels/read boundaries at this position) finditer finds nothing
-    and this degrades to one slice, at roughly C speed.
+    Fast path: every marker this removes (^x, $, +N…, -N…) contains one of the
+    four characters ^ $ + - . When none are present — the overwhelmingly common
+    case for CORAL's shallow pileups — the regex below matches nothing and would
+    return s unchanged, so we skip it entirely. This is byte-for-byte identical
+    to the regex path but avoids the regex-engine call and list building.
     """
+    if '^' not in s and '$' not in s and '+' not in s and '-' not in s:
+        return s
     out = []
     pos = 0
     for m in _CLEAN_RE.finditer(s):
@@ -47,26 +54,22 @@ def clean_bases(s):
 
 
 class PileupLine:
-    """Wraps one parsed pileup row. Caches clean_bases() per field index so
-    quality_check and context extraction never clean the same field twice."""
-    __slots__ = ('fields', '_clean')
+    """Wraps one parsed pileup row. clean_bases() has a cheap fast path (see
+    above), so re-cleaning a field costs a few membership tests; we skip the
+    per-line cache dict that this used to allocate on every one of ~10^8 lines."""
+    __slots__ = ('fields',)
 
     def __init__(self, fields):
         self.fields = fields
-        self._clean = {}
 
     def __getitem__(self, idx):
         return self.fields[idx]
 
     def clean(self, idx):
-        cached = self._clean.get(idx)
-        if cached is None:
-            cached = clean_bases(self.fields[idx])
-            self._clean[idx] = cached
-        return cached
+        return clean_bases(self.fields[idx])
 
     def nuc(self, idx):
-        cleaned = self.clean(idx)
+        cleaned = clean_bases(self.fields[idx])
         return cleaned[0].upper() if cleaned else 'N'
 
 
@@ -115,6 +118,87 @@ def extract_context(lines):
     return sequences
 
 
+def detect_mutation_triplet(triplets):
+    t1_mut = t2_mut = t1_3mer = t2_3mer = None
+
+    if triplets[REF_IDX][PREV_IDX] == triplets[TAXA1_IDX][PREV_IDX] == triplets[TAXA2_IDX][PREV_IDX] and \
+       triplets[REF_IDX][NEXT_IDX] == triplets[TAXA1_IDX][NEXT_IDX] == triplets[TAXA2_IDX][NEXT_IDX]:
+
+        ref_base = triplets[REF_IDX][CUR_IDX]
+        context = triplets[REF_IDX][PREV_IDX] + ref_base + triplets[REF_IDX][NEXT_IDX]
+        if ref_base == triplets[TAXA1_IDX][CUR_IDX] and ref_base != triplets[TAXA2_IDX][CUR_IDX]:
+            t2_mut = f"{context[0]}[{ref_base}>{triplets[TAXA2_IDX][CUR_IDX]}]{context[2]}"
+            t1_3mer, t2_3mer = context, context
+        elif ref_base == triplets[TAXA2_IDX][CUR_IDX] and ref_base != triplets[TAXA1_IDX][CUR_IDX]:
+            t1_mut = f"{context[0]}[{ref_base}>{triplets[TAXA1_IDX][CUR_IDX]}]{context[2]}"
+            t1_3mer, t2_3mer = context, context
+        elif ref_base == triplets[TAXA2_IDX][CUR_IDX] == triplets[TAXA1_IDX][CUR_IDX]:
+            t1_3mer, t2_3mer = context, context
+
+    return t1_mut, t2_mut, t1_3mer, t2_3mer
+
+
+def scan_pileup(line_iter, on_mut1=None, on_mut2=None):
+    """Single linear scan over pileup lines with a 3-position sliding window.
+
+    Returns (mut1, mut2, triplet1, triplet2) count dicts. For each detected
+    mutation calls on_mut1/on_mut2(chrom, pos, mutation) when provided — the
+    serial path uses these to stream CSV rows, the parallel path to collect
+    them. This is the single source of truth for the scan: both the serial
+    MutationExtractor and the parallel driver call it, so their results cannot
+    diverge.
+    """
+    mut1 = defaultdict(int)
+    mut2 = defaultdict(int)
+    trip1 = defaultdict(int)
+    trip2 = defaultdict(int)
+
+    it = iter(line_iter)
+    first = next(it, None)
+    second = next(it, None)
+    if first is None or second is None:
+        return mut1, mut2, trip1, trip2
+
+    line_fields = [None, parse_line(first), parse_line(second)]
+    qc_flags = [False, quality_check(line_fields[1]), quality_check(line_fields[2])]
+
+    for line in it:
+        line_fields = [line_fields[1], line_fields[2], parse_line(line)]
+        qc_flags = [qc_flags[1], qc_flags[2], quality_check(line_fields[2])]
+
+        if all(qc_flags) and consecutive(*line_fields):
+            triplets = extract_context(line_fields)
+            m1, m2, t1, t2 = detect_mutation_triplet(triplets)
+            chrom = line_fields[1][CHR_IDX]
+            pos = int(line_fields[1][POSITION_IDX])
+
+            if m1:
+                mut1[m1] += 1
+                if on_mut1:
+                    on_mut1(chrom, pos, m1)
+            if m2:
+                mut2[m2] += 1
+                if on_mut2:
+                    on_mut2(chrom, pos, m2)
+            if t1:
+                trip1[t1] += 1
+            if t2:
+                trip2[t2] += 1
+
+    return mut1, mut2, trip1, trip2
+
+
+def _write_extractor_outputs(mut1, mut2, trip1, trip2, out_json1, out_json2, trip_json1, trip_json2):
+    with open(out_json1, 'w') as f:
+        json.dump(mut1, f, indent=2)
+    with open(out_json2, 'w') as f:
+        json.dump(mut2, f, indent=2)
+    with open(trip_json1, 'w') as f:
+        json.dump(trip1, f, indent=2)
+    with open(trip_json2, 'w') as f:
+        json.dump(trip2, f, indent=2)
+
+
 class MutationExtractor:
     def __init__(self, reference, taxon1, taxon2, pileup_file, mutation_output_dir, triplet_output_dir,
                  no_full_mutations=False, no_cache=False, verbose=True):
@@ -148,84 +232,185 @@ class MutationExtractor:
             log("Mutation counts already exist. Skipping.", self.verbose)
             return
 
-        species_mut1 = defaultdict(int)
-        species_mut2 = defaultdict(int)
-        species_triplet1 = defaultdict(int)
-        species_triplet2 = defaultdict(int)
-
         csv1 = csv2 = None
+        on_mut1 = on_mut2 = None
         if not self.no_full_mutations:
             header = "chromosome,position,mutation\n"
             csv1 = gzip.open(self.csv_path1, 'wt')
             csv1.write(header)
             csv2 = gzip.open(self.csv_path2, 'wt')
             csv2.write(header)
+            on_mut1 = lambda chrom, pos, m: csv1.write(f"{chrom},{pos},{m}\n")
+            on_mut2 = lambda chrom, pos, m: csv2.write(f"{chrom},{pos},{m}\n")
 
         with gzip.open(self.pileup_file, 'rt') as f:
-            line_fields = [None, parse_line(f.readline()), parse_line(f.readline())]
-            qc_flags = [False, quality_check(line_fields[1]), quality_check(line_fields[2])]
-
-            for line in f:
-                line_fields = [line_fields[1], line_fields[2], parse_line(line)]
-                qc_flags = [qc_flags[1], qc_flags[2], quality_check(line_fields[2])]
-
-                if all(qc_flags) and consecutive(*line_fields):
-                    triplets = extract_context(line_fields)
-                    mut1, mut2, trip1, trip2 = self.detect_mutation_triplet(triplets)
-                    chrom = line_fields[1][CHR_IDX]
-                    pos = int(line_fields[1][POSITION_IDX])
-
-                    if mut1:
-                        species_mut1[mut1] += 1
-                        if csv1:
-                            csv1.write(f"{chrom},{pos},{mut1}\n")
-
-                    if mut2:
-                        species_mut2[mut2] += 1
-                        if csv2:
-                            csv2.write(f"{chrom},{pos},{mut2}\n")
-
-                    if trip1:
-                        species_triplet1[trip1] += 1
-                    if trip2:
-                        species_triplet2[trip2] += 1
+            species_mut1, species_mut2, species_triplet1, species_triplet2 = scan_pileup(f, on_mut1, on_mut2)
 
         if csv1:
             csv1.close()
         if csv2:
             csv2.close()
 
-        with open(self.out_json1, 'w') as f:
-            json.dump(species_mut1, f, indent=2)
-        with open(self.out_json2, 'w') as f:
-            json.dump(species_mut2, f, indent=2)
-
-        with open(self.trip_out_json1, 'w') as f:
-            json.dump(species_triplet1, f, indent=2)
-        with open(self.trip_out_json2, 'w') as f:
-            json.dump(species_triplet2, f, indent=2)
+        _write_extractor_outputs(species_mut1, species_mut2, species_triplet1, species_triplet2,
+                                 self.out_json1, self.out_json2, self.trip_out_json1, self.trip_out_json2)
 
         log(f"Saved mutation counts to {self.out_json1} and {self.out_json2}", self.verbose)
         log(f"Saved triplet counts to {self.trip_out_json1} and {self.trip_out_json2}", self.verbose)
 
     def detect_mutation_triplet(self, triplets):
-        t1_mut = t2_mut = t1_3mer = t2_3mer = None
+        return detect_mutation_triplet(triplets)
 
-        if triplets[REF_IDX][PREV_IDX] == triplets[TAXA1_IDX][PREV_IDX] == triplets[TAXA2_IDX][PREV_IDX] and \
-           triplets[REF_IDX][NEXT_IDX] == triplets[TAXA1_IDX][NEXT_IDX] == triplets[TAXA2_IDX][NEXT_IDX]:
 
-            ref_base = triplets[REF_IDX][CUR_IDX]
-            context = triplets[REF_IDX][PREV_IDX] + ref_base + triplets[REF_IDX][NEXT_IDX]
-            if ref_base == triplets[TAXA1_IDX][CUR_IDX] and ref_base != triplets[TAXA2_IDX][CUR_IDX]:
-                t2_mut = f"{context[0]}[{ref_base}>{triplets[TAXA2_IDX][CUR_IDX]}]{context[2]}"
-                t1_3mer, t2_3mer = context, context
-            elif ref_base == triplets[TAXA2_IDX][CUR_IDX] and ref_base != triplets[TAXA1_IDX][CUR_IDX]:
-                t1_mut = f"{context[0]}[{ref_base}>{triplets[TAXA1_IDX][CUR_IDX]}]{context[2]}"
-                t1_3mer, t2_3mer = context, context
-            elif ref_base == triplets[TAXA2_IDX][CUR_IDX] == triplets[TAXA1_IDX][CUR_IDX]:
-                t1_3mer, t2_3mer = context, context
+def _read_fai_chroms(fai_path):
+    """Return [(chrom, length), ...] in reference (.fai) order."""
+    chroms = []
+    with open(fai_path) as f:
+        for line in f:
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) >= 2:
+                chroms.append((parts[0], int(parts[1])))
+    return chroms
 
-        return t1_mut, t2_mut, t1_3mer, t2_3mer
+
+def _chroms_with_reads(bams):
+    """Union of reference names with >=1 mapped read in any BAM, via
+    `samtools idxstats` (reads only the index, near-instant). Chromosomes absent
+    here produce no pileup lines, so skipping them cannot change any output -- it
+    just avoids launching an mpileup for empty scaffolds."""
+    have = set()
+    for bam in bams:
+        out = subprocess.run(["samtools", "idxstats", bam],
+                             capture_output=True, text=True, check=True).stdout
+        for line in out.splitlines():
+            parts = line.split('\t')
+            if len(parts) >= 3 and parts[0] != '*' and int(parts[2]) > 0:
+                have.add(parts[0])
+    return have
+
+
+def _extract_region(chrom, ref_fasta, bams, no_full_mutations):
+    """Worker: generate this chromosome's pileup via index-based
+    `samtools mpileup -r <chrom>` (so no worker ever streams the whole file),
+    then scan it with the shared scan_pileup. The mpileup options match
+    Pileup.generate exactly (-B -d 100), so a chromosome's output is byte-
+    identical to its slice of the whole-genome pileup. Returns (chrom, count
+    dicts, CSV rows)."""
+    rows1 = []
+    rows2 = []
+    on1 = on2 = None
+    if not no_full_mutations:
+        on1 = lambda c, pos, m: rows1.append(f"{c},{pos},{m}\n")
+        on2 = lambda c, pos, m: rows2.append(f"{c},{pos},{m}\n")
+
+    cmd = ["samtools", "mpileup", "-f", ref_fasta, "-B", "-d", "100", "-r", chrom] + list(bams)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        with TextIOWrapper(proc.stdout) as stream:
+            mut1, mut2, trip1, trip2 = scan_pileup(stream, on1, on2)
+    finally:
+        proc.wait()
+    return chrom, dict(mut1), dict(mut2), dict(trip1), dict(trip2), rows1, rows2
+
+
+class ParallelMutationExtractor:
+    """Chromosome-parallel drop-in for MutationExtractor producing identical
+    output files. One task per chromosome generates that chromosome's pileup
+    directly from the indexed BAMs (`samtools mpileup -r`) and scans it, so no
+    worker reads the whole genome; a pool runs them concurrently and results are
+    merged (counts summed, CSV rows concatenated in reference/.fai order). Only
+    chromosomes that actually carry reads are processed."""
+
+    def __init__(self, reference, taxon1, taxon2, ref_fasta, bams, mutation_output_dir, triplet_output_dir,
+                 fai_path, cores, no_full_mutations=False, no_cache=False, verbose=True):
+        self.reference = reference
+        self.taxon1 = taxon1
+        self.taxon2 = taxon2
+        self.ref_fasta = ref_fasta
+        self.bams = list(bams)
+        self.mutation_output_dir = mutation_output_dir
+        self.triplet_output_dir = triplet_output_dir
+        self.fai_path = fai_path
+        self.cores = cores
+        self.no_full_mutations = no_full_mutations
+        self.no_cache = no_cache
+        self.verbose = verbose
+
+        self.out_json1 = os.path.join(mutation_output_dir, f"{taxon1}__{taxon2}__{reference}__mutations.json")
+        self.out_json2 = os.path.join(mutation_output_dir, f"{taxon2}__{taxon1}__{reference}__mutations.json")
+        self.trip_out_json1 = os.path.join(triplet_output_dir, f"{taxon1}__{taxon2}__{reference}__triplets.json")
+        self.trip_out_json2 = os.path.join(triplet_output_dir, f"{taxon2}__{taxon1}__{reference}__triplets.json")
+        self.csv_path1 = None if no_full_mutations else os.path.join(mutation_output_dir, f"{taxon1}__{taxon2}__{reference}__mutations.csv.gz")
+        self.csv_path2 = None if no_full_mutations else os.path.join(mutation_output_dir, f"{taxon2}__{taxon1}__{reference}__mutations.csv.gz")
+
+    def extract(self):
+        os.makedirs(self.mutation_output_dir, exist_ok=True)
+        os.makedirs(self.triplet_output_dir, exist_ok=True)
+
+        jsons_exist = all(os.path.exists(p) for p in [self.out_json1, self.out_json2, self.trip_out_json1, self.trip_out_json2])
+        csvs_exist = (self.no_full_mutations or all(os.path.exists(p) for p in [self.csv_path1, self.csv_path2]))
+        if not self.no_cache and jsons_exist and csvs_exist:
+            log("Mutation counts already exist. Skipping.", self.verbose)
+            return
+
+        chrom_lengths = _read_fai_chroms(self.fai_path)
+        chrom_order = [c for c, _ in chrom_lengths]
+        with_reads = _chroms_with_reads(self.bams)
+        # one task per chromosome that carries reads, longest-first so the big
+        # ones start early and dominate the makespan; empty scaffolds are skipped.
+        tasks = [c for c, _ in sorted(chrom_lengths, key=lambda cl: cl[1], reverse=True) if c in with_reads]
+        n_workers = max(1, min(self.cores, len(tasks) or 1))
+        log(f"Extracting mutations in parallel: {len(tasks)} chromosomes with reads over {n_workers} workers...", self.verbose)
+
+        args = [(c, self.ref_fasta, self.bams, self.no_full_mutations) for c in tasks]
+        if not args:
+            results = []
+        elif n_workers <= 1:
+            results = [_extract_region(*a) for a in args]
+        else:
+            # chunksize=1: dispatch one chromosome per grab so the few big arms
+            # land on different workers. The default chunksize bundles contiguous
+            # (here longest-first) tasks, which would pile every big chromosome
+            # onto a single worker and serialize the heavy work.
+            with multiprocessing.Pool(n_workers) as pool:
+                results = pool.starmap(_extract_region, args, chunksize=1)
+
+        mut1 = defaultdict(int)
+        mut2 = defaultdict(int)
+        trip1 = defaultdict(int)
+        trip2 = defaultdict(int)
+        rows1 = {}
+        rows2 = {}
+        for chrom, m1, m2, t1, t2, r1, r2 in results:
+            for k, v in m1.items():
+                mut1[k] += v
+            for k, v in m2.items():
+                mut2[k] += v
+            for k, v in t1.items():
+                trip1[k] += v
+            for k, v in t2.items():
+                trip2[k] += v
+            if r1:
+                rows1[chrom] = r1
+            if r2:
+                rows2[chrom] = r2
+
+        if not self.no_full_mutations:
+            header = "chromosome,position,mutation\n"
+            with gzip.open(self.csv_path1, 'wt') as c1:
+                c1.write(header)
+                for chrom in chrom_order:
+                    for row in rows1.get(chrom, ()):
+                        c1.write(row)
+            with gzip.open(self.csv_path2, 'wt') as c2:
+                c2.write(header)
+                for chrom in chrom_order:
+                    for row in rows2.get(chrom, ()):
+                        c2.write(row)
+
+        _write_extractor_outputs(mut1, mut2, trip1, trip2,
+                                 self.out_json1, self.out_json2, self.trip_out_json1, self.trip_out_json2)
+        log(f"Saved mutation counts to {self.out_json1} and {self.out_json2}", self.verbose)
+        log(f"Saved triplet counts to {self.trip_out_json1} and {self.trip_out_json2}", self.verbose)
 
 
 class FiveMerExtractor:

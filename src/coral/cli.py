@@ -30,6 +30,8 @@ def main():
     continuity_group.add_argument("--no-continuity", dest="continuity", action="store_false", help="Disable continuity mode")
     single.add_argument("--cores", type=int, default=None)
     single.add_argument("--divergence-time", type=int, default=None)
+    single.add_argument("--five-mer", dest="five_mer", action="store_true",
+                        help="Also extract 5-mer mutation contexts (adds a full pileup pass; off by default)")
 
     multi = subparsers.add_parser("run_multi", help="Run multi-species pipeline from Newick")
     multi.add_argument("--newick-tree", default=None)
@@ -84,6 +86,7 @@ def main():
                 cores=args.cores,
                 continuity=args.continuity,
                 divergence_time=args.divergence_time,
+                five_mer=args.five_mer,
             )
             pipeline.run()
 
