@@ -32,6 +32,16 @@ def main():
     single.add_argument("--divergence-time", type=int, default=None)
     single.add_argument("--five-mer", dest="five_mer", action="store_true",
                         help="Also extract 5-mer mutation contexts (adds a full pileup pass; off by default)")
+    single.add_argument("--repeat-mask", dest="repeat_mask", action="store_true",
+                        help="Mask repeats: skip pseudo-reads from species repeats and calls at "
+                             "reference repeat positions (off by default)")
+    single.add_argument("--repeat-masker", dest="repeat_masker", default="windowmasker",
+                        choices=["windowmasker", "repeatmasker"],
+                        help="Repeat masker backend (default: windowmasker, library-free)")
+    single.add_argument("--repeat-mask-frac", dest="repeat_mask_frac", type=float, default=0.5,
+                        help="Skip a pseudo-read whose fragment is >= this fraction repeat (default: 0.5)")
+    single.add_argument("--repeat-species", dest="repeat_species", default=None,
+                        help="RepeatMasker library clade (e.g. 'drosophila'); only for --repeat-masker repeatmasker")
 
     multi = subparsers.add_parser("run_multi", help="Run multi-species pipeline from Newick")
     multi.add_argument("--newick-tree", default=None)
@@ -87,6 +97,10 @@ def main():
                 continuity=args.continuity,
                 divergence_time=args.divergence_time,
                 five_mer=args.five_mer,
+                repeat_mask=args.repeat_mask,
+                repeat_masker=args.repeat_masker,
+                repeat_mask_frac=args.repeat_mask_frac,
+                repeat_species=args.repeat_species,
             )
             pipeline.run()
 

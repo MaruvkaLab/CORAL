@@ -14,6 +14,7 @@ from .mutation_extractor_manager import FiveMerExtractor, MutationExtractor, Mut
 from .pileup_manager import Pileup
 from .plot_utils import CoveragePlotter, MutationDensityPlotter, MutationSpectraPlotter
 from .utils import get_top_n_chromosomes, log
+from .repeat_masker import build_mask
 import psutil
 import pysam
 
@@ -47,8 +48,22 @@ class MutationExtractionPipeline:
         self.reference = None
         self.genomes = []
         self.alignments = []
+        self.reference_mask = None    # RepeatMask on the outgroup, if --repeat-mask
         self.verbose = verbose
         self.no_cache = no_cache
+
+    def _build_repeat_mask(self, genome):
+        """Build (cached) a repeat mask for `genome` if --repeat-mask is on, else
+        None. Uses WindowMasker by default (library-free); RepeatMasker if selected."""
+        if not self.params.get("repeat_mask", False):
+            return None
+        return build_mask(
+            genome.fasta_path, genome.output_dir,
+            tool=self.params.get("repeat_masker", "windowmasker"),
+            species=self.params.get("repeat_species"),
+            cores=self.params.get("cores", 1) or 1,
+            dust=self.params.get("repeat_dust", True),
+            no_cache=self.no_cache, verbose=self.verbose)
 
     
     def run(self):
@@ -109,6 +124,8 @@ class MutationExtractionPipeline:
         )
         self.reference.download()
         self.reference.index(aligner=self.aligner_name)
+        # Outgroup repeat mask -> used to drop calls at reference repeat positions.
+        self.reference_mask = self._build_repeat_mask(self.reference)
 
         # Ingroup genomes
         for name, acc in self.species_list:
@@ -120,7 +137,14 @@ class MutationExtractionPipeline:
                 verbose=self.verbose
             )
             genome.download()
-            genome.generate_fragment_fastq(length=self.params.get("fragment_length", 150), offset=self.params.get("fragment_offset", 75), force=self.no_cache)
+            # Species repeat mask -> don't even generate pseudo-reads from repeats.
+            species_mask = self._build_repeat_mask(genome)
+            genome.generate_fragment_fastq(
+                length=self.params.get("fragment_length", 150),
+                offset=self.params.get("fragment_offset", 75),
+                force=self.no_cache,
+                repeat_mask=species_mask,
+                mask_frac=self.params.get("repeat_mask_frac", 0.5))
             self.genomes.append(genome)
 
     def align_species(self):
@@ -207,7 +231,8 @@ class MutationExtractionPipeline:
                 cores=cores,
                 no_full_mutations=False,
                 no_cache=False,
-                verbose=self.verbose)
+                verbose=self.verbose,
+                ref_mask=self.reference_mask)
         else:
             mutation_extractor = MutationExtractor(
                 reference=self.reference.name,
@@ -218,7 +243,8 @@ class MutationExtractionPipeline:
                 triplet_output_dir=trip_dir,
                 no_full_mutations=False,
                 no_cache=False,
-                verbose=self.verbose)
+                verbose=self.verbose,
+                ref_mask=self.reference_mask)
         mutation_extractor.extract()
 
         # 5-mer extraction is an extra full pass over the pileup and is not used

@@ -138,7 +138,20 @@ def detect_mutation_triplet(triplets):
     return t1_mut, t2_mut, t1_3mer, t2_3mer
 
 
-def scan_pileup(line_iter, on_mut1=None, on_mut2=None):
+def _drop_masked(line_iter, ref_mask):
+    """Yield only pileup lines whose (chrom, 1-based pos) is not a reference repeat.
+    Dropping a masked line removes it from the 3-position window entirely, so no call
+    is made at OR adjacent to a repeat (the `consecutive` check breaks over the gap)."""
+    for line in line_iter:
+        t1 = line.find('\t')
+        t2 = line.find('\t', t1 + 1)
+        if t1 < 0 or t2 < 0:
+            continue
+        if not ref_mask.contains(line[:t1], int(line[t1 + 1:t2])):
+            yield line
+
+
+def scan_pileup(line_iter, on_mut1=None, on_mut2=None, ref_mask=None):
     """Single linear scan over pileup lines with a 3-position sliding window.
 
     Returns (mut1, mut2, triplet1, triplet2) count dicts. For each detected
@@ -146,13 +159,16 @@ def scan_pileup(line_iter, on_mut1=None, on_mut2=None):
     serial path uses these to stream CSV rows, the parallel path to collect
     them. This is the single source of truth for the scan: both the serial
     MutationExtractor and the parallel driver call it, so their results cannot
-    diverge.
+    diverge. When `ref_mask` is given, positions inside reference repeats are
+    dropped before the scan so no call is made there.
     """
     mut1 = defaultdict(int)
     mut2 = defaultdict(int)
     trip1 = defaultdict(int)
     trip2 = defaultdict(int)
 
+    if ref_mask:
+        line_iter = _drop_masked(line_iter, ref_mask)
     it = iter(line_iter)
     first = next(it, None)
     second = next(it, None)
@@ -201,7 +217,7 @@ def _write_extractor_outputs(mut1, mut2, trip1, trip2, out_json1, out_json2, tri
 
 class MutationExtractor:
     def __init__(self, reference, taxon1, taxon2, pileup_file, mutation_output_dir, triplet_output_dir,
-                 no_full_mutations=False, no_cache=False, verbose=True):
+                 no_full_mutations=False, no_cache=False, verbose=True, ref_mask=None):
         self.reference = reference
         self.taxon1 = taxon1
         self.taxon2 = taxon2
@@ -211,6 +227,7 @@ class MutationExtractor:
         self.no_full_mutations = no_full_mutations
         self.no_cache = no_cache
         self.verbose = verbose
+        self.ref_mask = ref_mask
 
         self.out_json1 = os.path.join(self.mutation_output_dir, f"{taxon1}__{taxon2}__{reference}__mutations.json")
         self.out_json2 = os.path.join(self.mutation_output_dir, f"{taxon2}__{taxon1}__{reference}__mutations.json")
@@ -244,7 +261,8 @@ class MutationExtractor:
             on_mut2 = lambda chrom, pos, m: csv2.write(f"{chrom},{pos},{m}\n")
 
         with gzip.open(self.pileup_file, 'rt') as f:
-            species_mut1, species_mut2, species_triplet1, species_triplet2 = scan_pileup(f, on_mut1, on_mut2)
+            species_mut1, species_mut2, species_triplet1, species_triplet2 = scan_pileup(
+                f, on_mut1, on_mut2, ref_mask=self.ref_mask)
 
         if csv1:
             csv1.close()
@@ -288,7 +306,7 @@ def _chroms_with_reads(bams):
     return have
 
 
-def _extract_region(chrom, ref_fasta, bams, no_full_mutations):
+def _extract_region(chrom, ref_fasta, bams, no_full_mutations, ref_mask=None):
     """Worker: generate this chromosome's pileup via index-based
     `samtools mpileup -r <chrom>` (so no worker ever streams the whole file),
     then scan it with the shared scan_pileup. The mpileup options match
@@ -306,7 +324,7 @@ def _extract_region(chrom, ref_fasta, bams, no_full_mutations):
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
         with TextIOWrapper(proc.stdout) as stream:
-            mut1, mut2, trip1, trip2 = scan_pileup(stream, on1, on2)
+            mut1, mut2, trip1, trip2 = scan_pileup(stream, on1, on2, ref_mask=ref_mask)
     finally:
         proc.wait()
     return chrom, dict(mut1), dict(mut2), dict(trip1), dict(trip2), rows1, rows2
@@ -321,7 +339,7 @@ class ParallelMutationExtractor:
     chromosomes that actually carry reads are processed."""
 
     def __init__(self, reference, taxon1, taxon2, ref_fasta, bams, mutation_output_dir, triplet_output_dir,
-                 fai_path, cores, no_full_mutations=False, no_cache=False, verbose=True):
+                 fai_path, cores, no_full_mutations=False, no_cache=False, verbose=True, ref_mask=None):
         self.reference = reference
         self.taxon1 = taxon1
         self.taxon2 = taxon2
@@ -334,6 +352,7 @@ class ParallelMutationExtractor:
         self.no_full_mutations = no_full_mutations
         self.no_cache = no_cache
         self.verbose = verbose
+        self.ref_mask = ref_mask
 
         self.out_json1 = os.path.join(mutation_output_dir, f"{taxon1}__{taxon2}__{reference}__mutations.json")
         self.out_json2 = os.path.join(mutation_output_dir, f"{taxon2}__{taxon1}__{reference}__mutations.json")
@@ -361,7 +380,10 @@ class ParallelMutationExtractor:
         n_workers = max(1, min(self.cores, len(tasks) or 1))
         log(f"Extracting mutations in parallel: {len(tasks)} chromosomes with reads over {n_workers} workers...", self.verbose)
 
-        args = [(c, self.ref_fasta, self.bams, self.no_full_mutations) for c in tasks]
+        # ship each worker only its chromosome's slice of the mask, not the whole
+        # genome's (a genome-scale mask is ~10^6 intervals -> costly to pickle N times).
+        args = [(c, self.ref_fasta, self.bams, self.no_full_mutations,
+                 self.ref_mask.for_contig(c) if self.ref_mask else None) for c in tasks]
         if not args:
             results = []
         elif n_workers <= 1:
