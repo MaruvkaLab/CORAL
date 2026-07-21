@@ -347,6 +347,7 @@ from .multiple_species_utils import (
     parse_species_accession_from_newick,
     annotate_tree_with_indices,
     save_annotated_tree,
+    tree_from_phylip_outtree,
 )
 from .run_phylip import run_phylip, check_phylip_available
 
@@ -390,6 +391,16 @@ class MultiSpeciesMutationPipeline:
         os.makedirs(self.output_dir, exist_ok=True)
 
     def run(self):
+        # 1. If run_tree is provided, fix the nodes numbers, as done with no_tree
+        """
+        2. Create json file from Mutations csv.gz files
+        like in mutation_extractor_manager.py ParallelMutationExtractor extract
+        3. Create a triplet table
+        like in mutation_extractor_manager.py TripletExtractor extract
+        3. Create Tables directory with normalized_scaled.tsv, collapsed_mutations.tsv, scaled_raw.tsv and triplets.tsv files 
+        like in mutation_extractor_manager.py MutationNormalizer normalize"""
+
+
         log("Starting multi-species mutation extraction pipeline...", self.verbose)
         if self.newick_tree:
             self.parse_and_annotate_tree()
@@ -398,7 +409,7 @@ class MultiSpeciesMutationPipeline:
         self.download_index_and_fragment()
         self.align_species_to_outgroup()
         self.generate_pileup()
-        self._extract_mutations()
+        self._extract_mutations() # writes matching_bases.csv.gz; IF an input tree is given it will write spectra too.
         
         # Validate PHYLIP is available before phylogenetic reconstruction
         if not check_phylip_available('dnapars'):
@@ -408,20 +419,44 @@ class MultiSpeciesMutationPipeline:
             )
         
         self._reconstruct_phylogeny()
+
+        """
+        Branch labels come from PHYLIP's .outfile interior numbering (clade-matched
+        by tree_from_phylip_outtree) for BOTH paths -> labels are consistent and
+        match the .outfile. Tree given -> the user topology PHYLIP just scored;
+        no tree -> the topology PHYLIP inferred. matching_bases.csv.gz + triplets.json
+        are cached from the first pass, so this only runs the Fitch + spectra half."""
+        if self.newick_tree:
+            phylip_outtree = os.path.join(self.output_dir, "multi_species_phylip_with_tree", "given_tree_run.outtree")
+        else:
+            phylip_outtree = os.path.join(self.output_dir, "multi_species_phylip_no_tree", "multi_species_phylip.outtree")
+        self.tree = tree_from_phylip_outtree(phylip_outtree, self.terminal_mapping, self.outgroup_name)
+        self._extract_mutations()   # cached CSV -> Fitch -> mutation_spectras.tsv + Tables + Plots + CSVs
+
+        """# No input tree -> use the tree PHYLIP just inferred to produce spectra.
+        # matching_bases.csv.gz is cached, so this only runs the Fitch + spectra half.
+        if self.tree is None:
+             inferred = os.path.join(self.output_dir, "multi_species_phylip_no_tree", "multi_species_phylip.outtree")
+             self.tree = tree_from_phylip_outtree(inferred, self.terminal_mapping, self.outgroup_name)
+             self._extract_mutations()      # cached CSV -> Fitch -> mutation_spectras.tsv + Plots + CSVs"""
+
         log("Pipeline completed successfully.", self.verbose)
 
     def parse_and_annotate_tree(self):
         accession_lookup, default_outgroup = parse_species_accession_from_newick(self.newick_tree)
         if not self.outgroup_name:
             self.outgroup_name = default_outgroup
-        self.tree, self.terminal_mapping, self.species_list = annotate_tree_with_indices(self.newick_tree, self.outgroup_name, verbose=self.verbose)
+        # Annotate only for the mapping + the intree PHYLIP needs. Do NOT keep this
+        # tree for Fitch: branch labels come from PHYLIP's .outfile below, so
+        # self.tree stays None and the first _extract_mutations() writes CSV only.
+        annotated_tree, self.terminal_mapping, self.species_list = annotate_tree_with_indices(self.newick_tree, self.outgroup_name, verbose=self.verbose)
 
         # Rebuild species_dict in the same order as species_list (outgroup first),
         # so self.genomes and self.alignments follow the same ordering.
         self.species_dict = {name: accession_lookup[name] for name in self.species_list}
 
         tree_path = os.path.join(self.output_dir, "annotated_tree.nwk")
-        save_annotated_tree(self.tree, tree_path)
+        save_annotated_tree(annotated_tree, tree_path)
         with open(os.path.join(self.output_dir, "species_mapping.json"), 'w') as f:
             json.dump(self.terminal_mapping, f, indent=2)
         #with open(os.path.join(self.output_dir, "species_mapping2.json"), 'w') as f:
