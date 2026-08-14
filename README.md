@@ -42,14 +42,14 @@ pip install -e .
 ```bash
 coral --help
 samtools --version
-bwa
+bwa-mem2 version
 datasets --version
 ```
 
 The provided `environment.yml` installs all required dependencies, including:
 
 * Python 3.10
-* BWA (classic)
+* BWA-MEM2 (default aligner; `--aligner-name bwa` still works if classic BWA is installed)
 * SAMtools
 * NCBI Datasets CLI
 * unzip
@@ -64,6 +64,19 @@ Install only if using phylogenetic inference via `coral run_multi` or `coral run
 ```bash
 conda install -c bioconda phylip
 ```
+
+### Optional: repeat masking
+
+Repeat masking is **off by default**. Enable it with `--repeat-mask`, which skips pseudo-reads
+that are mostly repeat and suppresses calls at masked reference positions:
+
+```bash
+conda install -c bioconda blast          # windowmasker, the default backend
+conda install -c bioconda repeatmasker   # only for --repeat-mask repeatmasker
+```
+
+WindowMasker needs no repeat library, so it works for any species; RepeatMasker is more precise
+where a curated library exists for the clade (`--repeat-species`).
 
 ---
 
@@ -136,6 +149,15 @@ Each run produces a self-contained output directory containing:
 * `Mutations/*_mutations.json` – trinucleotide mutation counts
 * `Tables/*.tsv` – normalized mutation spectra
 * `Plots/*.png` – diagnostic and summary plots
+* `run_summary.json` – extraction diagnostics: pileup lines and why they were rejected, windows skipped over coverage gaps, and the classification of every scored site
+
+`run_summary.json` also records `ref_differs` – sites where both sister taxa
+share a base that differs from the reference. This is **not** a reference-branch mutation:
+with only three taxa, a change on the reference branch and a change on the branch ancestral
+to both sisters are equally parsimonious, so the site cannot be polarized. The accompanying
+`reference_difference_spectrum` is written as `sister_base > reference_base` by convention
+and mixes both directions; it is a divergence spectrum, not a branch mutation spectrum. See
+`OUTPUT_FORMAT.md`.
 
 Mutation files are named:
 

@@ -16,6 +16,8 @@ class Genome:
         self.fasta_path = fasta_path if fasta_path else os.path.join(self.output_dir, f"{name}.fasta")
         self.fastq_path = None
         self.verbose = verbose
+        self.n_contigs = None   # set when the FASTA is parsed for fragmentation
+        self.total_bp = None
 
     def download(self):
         if os.path.exists(self.fasta_path) and not self.no_cache:
@@ -80,8 +82,8 @@ class Genome:
         # ---- BWA family explicit indexing ----
 
         if aligner == "bwa-mem2":
-            # bwa-mem2 index files
-            required_exts = ["bwt.2bit.64", "pac", "sa"]
+            # bwa-mem2 writes no .sa; requiring one would re-index on every run
+            required_exts = ["0123", "amb", "ann", "bwt.2bit.64", "pac"]
             index_cmd = ["bwa-mem2", "index", self.fasta_path]
         else:
             # classic bwa index files
@@ -133,6 +135,8 @@ class Genome:
             record.id: record.seq
             for record in SeqIO.parse(self.fasta_path, "fasta")
         }
+        self.n_contigs = len(chromosomes)
+        self.total_bp = sum(len(seq) for seq in chromosomes.values())
 
         # If a repeat mask is given, don't emit a fragment that is >= mask_frac
         # repeat: those reads carry no clean orthologous signal and mostly seed

@@ -19,27 +19,27 @@ PILEUP = [
 
 
 def test_unmasked_calls_the_mutation():
-    mut1, mut2, _, _ = scan_pileup(iter(PILEUP))
+    mut1, mut2, _, _, _, _ = scan_pileup(iter(PILEUP))
     assert mut2 == {"A[C>T]G": 1}
     assert mut1 == {}
 
 
 def test_masking_the_center_drops_the_call():
     mask = RepeatMask({"chr1": [(101, 101)]})
-    mut1, mut2, _, _ = scan_pileup(iter(PILEUP), ref_mask=mask)
+    mut1, mut2, _, _, _, _ = scan_pileup(iter(PILEUP), ref_mask=mask)
     assert mut2 == {}                       # position removed -> no call there
 
 
 def test_masking_a_flank_also_drops_the_call():
     # removing a flank breaks the 3-position window, so the center can't be called
     mask = RepeatMask({"chr1": [(100, 100)]})
-    _, mut2, _, _ = scan_pileup(iter(PILEUP), ref_mask=mask)
+    _, mut2, _, _, _, _ = scan_pileup(iter(PILEUP), ref_mask=mask)
     assert mut2 == {}
 
 
 def test_mask_elsewhere_keeps_the_call():
     mask = RepeatMask({"chr1": [(500, 600)], "chr2": [(1, 100)]})
-    _, mut2, _, _ = scan_pileup(iter(PILEUP), ref_mask=mask)
+    _, mut2, _, _, _, _ = scan_pileup(iter(PILEUP), ref_mask=mask)
     assert mut2 == {"A[C>T]G": 1}
 
 
