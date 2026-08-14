@@ -4,7 +4,7 @@ channels:
   - bioconda
 dependencies:
   - python=3.10
-  - bwa=0.7.17
+  - bwa-mem2
   - samtools=1.17
   - ncbi-datasets-cli
   - numpy
@@ -22,3 +22,9 @@ dependencies:
   # Optional: PHYLIP (required for multi-species pipeline and run_phylip command)
   # Uncomment the following line if you need PHYLIP functionality:
   # - phylip
+
+  # Optional: repeat masking (--repeat-mask, off by default).
+  # blast provides windowmasker (the default backend); repeatmasker is only
+  # needed for --repeat-mask repeatmasker.
+  # - blast
+  # - repeatmasker

@@ -18,6 +18,7 @@ CORAL creates a self-contained output directory for each run. The directory stru
       ├── Tables/                    # Normalized spectra tables
       ├── Plots/                     # Visualization plots
       ├── Intervals/                 # Read interval files (for coverage plots)
+      ├── run_summary.json           # Extraction diagnostics (one per run/trio)
       └── pipeline_timings.json      # Pipeline execution timing information
 ```
 
@@ -239,6 +240,72 @@ For `coral run_multi`, additional files are created:
 - Format: Gzipped TSV
 - Columns: `chromosome`, `start`, `end`
 - Content: Genomic intervals covered by aligned reads
+
+### Run Summary (`run_summary.json`)
+
+One file per run directory, i.e. per trio, written by the mutation extractor. It records
+what the scan saw, including the sites that produce no mutation call and therefore appear
+in no other output. Counts are omitted when zero, so read them with a default of 0.
+
+```json
+{
+  "pileup_lines":      { "lines_after_mask": 4166311, "lines_masked": 0,
+                         "no_depth": 12034, "reads_disagree": 881, "insertion": 55 },
+  "candidate_windows": { "non_consecutive": 20714 },
+  "site_classes":      { "identical": 2564353, "taxa1_mut": 105862, "taxa2_mut": 136417,
+                         "ref_differs": 227255, "all_differ": 22913,
+                         "flanks_not_conserved": 1109511 },
+  "reference_difference_spectrum": { "A[C>T]G": 3311, "...": 0 }
+}
+```
+
+**`pileup_lines`** counts individual pileup lines. `lines_after_mask` is the number of lines
+the scan actually saw, i.e. after repeat masking removed any; `lines_masked` is how many
+masking removed. The remaining keys are per-line QC rejections: `no_depth`, `deletion`,
+`insertion`, `reads_disagree`, `unparsed`. A line is attributed to the *first* check it
+fails, so a line with both an insertion and low depth is counted once, under `insertion`.
+`reads_disagree` means reads within one species disagree at that position; pseudo-reads
+tiling one assembly are identical where they overlap, so this indicates reads arriving from
+different loci (paralogy or mismapping).
+
+**`candidate_windows`** counts 3-position windows, not lines. `non_consecutive` is windows
+whose three lines pass QC and lie on one contig but are not at adjacent positions, i.e. the
+window spans a coverage gap. Windows spanning a contig boundary are never formed and are
+not counted, so that the whole-genome scan and the per-chromosome parallel scan produce
+identical summaries.
+
+**`site_classes`** counts the windows that were scored, partitioning them:
+
+| Reference | Taxa1 | Taxa2 | Class |
+|---|---|---|---|
+| A | A | A | `identical` |
+| A | C | A | `taxa1_mut` |
+| A | A | C | `taxa2_mut` |
+| A | C | C | `ref_differs` |
+| A | C | G | `all_differ` |
+
+with `flanks_not_conserved` for any window whose flanking bases are not identical across
+all three species. `identical + taxa1_mut + taxa2_mut` is the callable-site total that the
+triplet counts and mutation rates are based on.
+
+**`ref_differs` is deliberately not called an outgroup mutation.** Both
+sisters carry one base and the reference carries another, but three taxa cannot polarize
+that: a single change on the reference branch and a single change on the branch ancestral
+to both sisters are equally parsimonious. Resolving it needs a fourth taxon.
+
+The pipeline adds four more sections after extraction: **`run`** (run id, taxa, parameters,
+tool versions), **`genomes`** (accession, contig count and total bp), **`alignment`**
+(per species: read counts split into `kept_high_mapq` versus `kept_rescued` by the
+continuity rule, the filtered categories, and the full MAPQ histogram), and **`timings`**
+(per-stage wall and CPU seconds, per-species alignment time).
+`alignment` is absent when the BAMs were reused from a previous run rather than re-filtered.
+
+**`reference_difference_spectrum`** is the trinucleotide spectrum of those same sites,
+written as `sister_base > reference_base`. Because the change is unpolarized, this
+direction is a convention, not an inference — where the change actually occurred on the
+sister-ancestor branch, the true substitution is the reverse. Treat it as a divergence
+spectrum between the sister pair's ancestor and the reference, not as a branch-specific
+mutation spectrum, and do not feed it to signature extraction as if it were one.
 
 ## Notes
 
