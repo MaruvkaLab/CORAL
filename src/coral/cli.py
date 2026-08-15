@@ -3,7 +3,6 @@ import json
 import os
 import sys
 from .pipeline import MutationExtractionPipeline, MultiSpeciesMutationPipeline
-from .run_phylip import run_phylip
 
 def main():
     parser = argparse.ArgumentParser(description="Species Mutation Extraction CLI")
@@ -120,6 +119,7 @@ def main():
             pipeline.run()
 
         elif args.subcmd == "run_phylip":
+            from .run_phylip import run_phylip
             with open(args.mapping) as f:
                 mapping = json.load(f)
             run_phylip(

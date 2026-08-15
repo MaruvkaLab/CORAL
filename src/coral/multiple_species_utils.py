@@ -4,13 +4,13 @@ import random
 import re
 import pandas as pd
 from io import StringIO
-from ete3 import Tree
 import sys
 import os
 import json
 from .utils import log
 
 def parse_species_accession_from_newick(newick_str):
+    from ete3 import Tree
     tree = Tree(newick_str, format=1)
     species_accession_dict = {}
     for leaf in tree.iter_leaves():
@@ -37,6 +37,7 @@ def parse_species_accession_from_newick(newick_str):
 
 
 def annotate_tree_with_indices(newick_str, outgroup_name, file_path=None, verbose=True):
+    from ete3 import Tree
     tree = Tree(newick_str, format=1)
 
     # Normalize leaf names
