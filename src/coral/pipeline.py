@@ -152,7 +152,8 @@ class MutationExtractionPipeline:
         timed_stage("Generate Pileup", self.generate_pileup)
         timed_stage("Extract Mutations and Triplets", self.extract_mutations_and_triplets)
         timed_stage("Extract Intervals", self.extract_intervals)
-        timed_stage("Run Plots", self.run_plots)
+        if self.params.get("plots", True):
+            timed_stage("Run Plots", self.run_plots)
         self.genome_stats = self._collect_genome_stats()  # before cleanup removes the FASTAs
         timed_stage("Cleanup files", self.cleanup)
 

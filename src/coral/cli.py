@@ -29,6 +29,8 @@ def main():
     continuity_group.add_argument("--no-continuity", dest="continuity", action="store_false", help="Disable continuity mode")
     single.add_argument("--cores", type=int, default=None)
     single.add_argument("--divergence-time", type=int, default=None)
+    single.add_argument("--no-plots", dest="plots", action="store_false", default=True,
+                        help="Skip the plotting stage (saves time and a lot of small PNG files)")
     single.add_argument("--five-mer", dest="five_mer", action="store_true",
                         help="Also extract 5-mer mutation contexts (adds a full pileup pass; off by default)")
     single.add_argument("--repeat-mask", dest="repeat_mask", nargs="?", const="windowmasker",
@@ -93,6 +95,7 @@ def main():
                 continuity=args.continuity,
                 divergence_time=args.divergence_time,
                 five_mer=args.five_mer,
+                plots=args.plots,
                 repeat_mask=bool(args.repeat_mask),
                 repeat_masker=args.repeat_mask or "windowmasker",
                 repeat_species=args.repeat_species,
