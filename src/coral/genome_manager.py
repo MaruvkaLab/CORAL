@@ -1,7 +1,8 @@
 import os
+import sys
 import subprocess
 import shutil
-from .utils import run_cmd, log
+from .utils import run_cmd, run_cmd_retry, log
 from Bio import SeqIO
 
 
@@ -30,10 +31,18 @@ class Genome:
 
         log(f"Downloading genome for {self.name} ({self.accession})", self.verbose)
         zip_path = os.path.join(temp_dir, f"{self.name}.zip")
-        run_cmd([
+        download_cmd = [
             "datasets", "download", "genome", "accession", self.accession,
             "--filename", zip_path
-        ], verbose=self.verbose)
+        ]
+        # Removes the progress bar if stderr is not a TTY (e.g., when running in a non-interactive environment)
+        if not sys.stderr.isatty():
+            download_cmd.append("--no-progressbar")
+        # Raises NCBI's per-IP rate limit (3 -> 10 req/s) when a key is available
+        api_key = os.environ.get("NCBI_API_KEY")
+        if api_key:
+            download_cmd += ["--api-key", api_key]
+        run_cmd_retry(download_cmd, verbose=self.verbose)
 
         log("Unzipping genome...", self.verbose)
         run_cmd(["unzip", "-q", "-o", zip_path, "-d", temp_dir], verbose=self.verbose)
