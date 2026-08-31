@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 import shutil
+from itertools import chain
 from .utils import run_cmd, run_cmd_retry, log
 from Bio import SeqIO
 
@@ -133,27 +134,25 @@ class Genome:
             return output_fastq
 
 
-        def split_sequence(seq, offset, section_size):
-            last_start = len(seq) - section_size
-            sections = [(i, seq[i:i+section_size]) for i in range(0, last_start, offset)]
-            if last_start > 0:
-                sections.append((last_start, seq[last_start:]))
-            return sections
-
-        chromosomes = {
-            record.id: record.seq
-            for record in SeqIO.parse(self.fasta_path, "fasta")
-        }
-        self.n_contigs = len(chromosomes)
-        self.total_bp = sum(len(seq) for seq in chromosomes.values())
-
         # If a repeat mask is given, don't emit a fragment that is >= mask_frac
         # repeat: those reads carry no clean orthologous signal and mostly seed
         # paralog/repeat mis-mappings. Fragment span is 1-based inclusive.
+        self.n_contigs = self.total_bp = 0
         written = skipped = 0
         with open(output_fastq, 'w') as out:
-            for chrom_name, sequence in chromosomes.items():
-                for i, (start, frag) in enumerate(split_sequence(sequence, offset, length)):
+            for record in SeqIO.parse(self.fasta_path, "fasta"):
+                chrom_name = record.id
+                sequence = str(record.seq)
+                self.n_contigs += 1
+                self.total_bp += len(sequence)
+
+                last_start = len(sequence) - length
+                starts = range(0, last_start, offset)
+                if last_start > 0:
+                    starts = chain(starts, (last_start,))
+
+                for start in starts:
+                    frag = sequence[start:start + length]
                     end = start + len(frag) - 1
                     if repeat_mask and repeat_mask.masked_fraction(chrom_name, start + 1, end + 1) >= mask_frac:
                         skipped += 1

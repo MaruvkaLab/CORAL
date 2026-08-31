@@ -1,48 +1,47 @@
-"""Repeat masking for the CORAL pipeline.
+"""Repeat masking utilities for the CORAL pipeline.
 
-CORAL under-cleans the mutation spectrum when reads from interspersed repeats or
-paralogous/duplicated regions align to the outgroup and produce false substitution
-calls. This module runs an external repeat masker on a genome (once, cached like the
-bwa index) and exposes the masked intervals as a `RepeatMask` used two ways:
+This module runs an external repeat masker on a genome and stores the resulting
+repeat intervals in a `RepeatMask`.
 
-  * species side  -- skip pseudo-reads whose fragment is mostly repeat, so they are
-    never generated (Genome.generate_fragment_fastq).
-  * outgroup side -- skip pileup positions inside reference repeats, so no call is
-    made there (mutation extractor).
+The mask is used to:
+  * skip pseudo-reads whose fragment is mostly repetitive
+    (`Genome.generate_fragment_fastq`);
+  * skip pileup positions that fall inside repetitive regions of the outgroup.
 
-Both are non-destructive interval filters: the alignment and file formats are
-unchanged. Two backends are supported (nothing here re-implements repeat finding):
+Two repeat-masking backends are supported:
+  * **windowmasker** (default) -- NCBI WindowMasker; de novo and
+    k-mer-frequency based, with no species-specific repeat library required.
+  * **repeatmasker** -- RepeatMasker; library-based and optionally configured
+    for a specific species or clade.
 
-  * **windowmasker** (default) -- NCBI WindowMasker (BLAST+). De novo, k-mer-count
-    based, needs NO species library, runs in seconds, and flags exactly the
-    over-represented sequence that drives paralogy. The right default for a
-    multi-taxa pipeline. `conda install -c bioconda blast`.
-  * **repeatmasker** -- RepeatMasker (https://www.repeatmasker.org/). Library-based
-    (Dfam/RepBase); more precise and annotated where a good library exists, but
-    slow and library-dependent. `conda install -c bioconda repeatmasker`.
-
-Both are consumed only as repeat *intervals*, so backends are interchangeable.
+Both backends are converted to the same interval representation, so downstream
+code is independent of the masking tool used.
 """
 
-import bisect
 import os
+from array import array
+
+import numpy as np
 
 from .utils import run_cmd, log
 
 
-def _merge(intervals):
-    """Merge a list of (start, end) 1-based inclusive intervals into sorted,
-    non-overlapping ones."""
-    if not intervals:
-        return []
-    intervals = sorted(intervals)
-    merged = [list(intervals[0])]
-    for s, e in intervals[1:]:
-        if s <= merged[-1][1] + 1:            # touching/overlapping -> extend
-            merged[-1][1] = max(merged[-1][1], e)
-        else:
-            merged.append([s, e])
-    return [(s, e) for s, e in merged]
+def _merge(a):
+    """Merge an (N, 2) array of 1-based inclusive intervals."""
+    if len(a) == 0:
+        return np.empty(0, np.int64), np.empty(0, np.int64)
+
+    a = a[np.argsort(a[:, 0], kind="stable")]
+    starts, ends = a.T
+
+    # Maximum end reached up to each interval
+    max_end = np.maximum.accumulate(ends)
+
+    # Indices where a new merged interval begins
+    new_group = np.r_[True, starts[1:] > max_end[:-1] + 1]
+    idx = np.flatnonzero(new_group)
+
+    return starts[idx], np.maximum.reduceat(ends, idx)
 
 
 class RepeatMask:
@@ -54,27 +53,32 @@ class RepeatMask:
     """
 
     def __init__(self, intervals=None):
-        # chrom -> (starts[], ends[]) parallel sorted lists of merged intervals
+        # chrom -> (starts[], ends[]) parallel sorted arrays of merged intervals
         self._starts = {}
         self._ends = {}
         for chrom, ivs in (intervals or {}).items():
-            merged = _merge(ivs)
-            self._starts[chrom] = [s for s, _ in merged]
-            self._ends[chrom] = [e for _, e in merged]
+            s, e = _merge(np.asarray(ivs, dtype=np.int64).reshape(-1, 2))
+            self._starts[chrom] = s
+            self._ends[chrom] = e
 
     def __bool__(self):
-        return any(self._starts.values())
+        return any(len(v) for v in self._starts.values())
 
     @property
     def n_intervals(self):
         return sum(len(v) for v in self._starts.values())
 
+    @property
+    def n_masked_bases(self):
+        return sum(int(self._ends[chrom].sum() - starts.sum()) + len(starts)
+                   for chrom, starts in self._starts.items())
+
     def contains(self, chrom, pos):
         """Is 1-based position `pos` inside a repeat on `chrom`?"""
         starts = self._starts.get(chrom)
-        if not starts:
+        if starts is None or len(starts) == 0:
             return False
-        i = bisect.bisect_right(starts, pos) - 1
+        i = int(starts.searchsorted(pos, "right")) - 1
         return i >= 0 and pos <= self._ends[chrom][i]
 
     def for_contig(self, chrom):
@@ -90,13 +94,13 @@ class RepeatMask:
     def masked_bases(self, chrom, start, end):
         """Number of masked bases in the 1-based inclusive span [start, end]."""
         starts = self._starts.get(chrom)
-        if not starts:
+        if starts is None or len(starts) == 0:
             return 0
         ends = self._ends[chrom]
         total = 0
-        i = bisect.bisect_right(starts, end) - 1     # last interval starting <= end
+        i = int(starts.searchsorted(end, "right")) - 1   # last interval starting <= end
         while i >= 0 and ends[i] >= start:
-            total += min(end, ends[i]) - max(start, starts[i]) + 1
+            total += min(end, int(ends[i])) - max(start, int(starts[i])) + 1
             i -= 1
         return total
 
@@ -128,7 +132,7 @@ class RepeatMask:
                     continue
                 if start > end:
                     start, end = end, start
-                intervals.setdefault(chrom, []).append((start, end))
+                intervals.setdefault(chrom, array("q")).extend((start, end))
         return cls(intervals)
 
     @classmethod
@@ -153,7 +157,7 @@ class RepeatMask:
                 except ValueError:
                     continue
                 if chrom is not None:
-                    intervals.setdefault(chrom, []).append((start, end))
+                    intervals.setdefault(chrom, array("q")).extend((start, end))
         return cls(intervals)
 
     @classmethod
@@ -167,7 +171,7 @@ class RepeatMask:
                 c = line.split('\t')
                 if len(c) < 3:
                     continue
-                intervals.setdefault(c[0], []).append((int(c[1]) + 1, int(c[2])))
+                intervals.setdefault(c[0], array("q")).extend((int(c[1]) + 1, int(c[2])))
         return cls(intervals)
 
     def to_bed(self, bed_path):
@@ -252,18 +256,23 @@ def build_mask(fasta_path, out_dir, tool="windowmasker", species=None, cores=1,
         raise ValueError(f"unknown repeat masker tool {tool!r} "
                          "(expected 'windowmasker' or 'repeatmasker')")
     mask.to_bed(raw + ".repeats.bed")
-    log(f"  repeat intervals: {mask.n_intervals} "
-        f"({100 * _fraction_masked(mask):.1f}% of masked-contig span, {tool})", verbose)
+    total_bp = _total_bp(fasta_path)
+    masked = mask.n_masked_bases
+    pct = f"{100 * masked / total_bp:.1f}% of {total_bp:,} bp" if total_bp else "genome length unknown"
+    log(f"  repeat intervals: {mask.n_intervals}, masked bases: {masked:,} ({pct}, {tool})",
+        verbose)
     return mask
 
 
-def _fraction_masked(mask):
-    """Rough overall masked fraction across contigs the mask knows about."""
-    masked = span = 0
-    for chrom, starts in mask._starts.items():
-        ends = mask._ends[chrom]
-        if not starts:
-            continue
-        masked += sum(e - s + 1 for s, e in zip(starts, ends))
-        span += ends[-1]
-    return masked / span if span else 0.0
+def _total_bp(fasta_path):
+    """Total sequence length of `fasta_path`, from its .fai if one exists."""
+    fai = fasta_path + ".fai"
+    if os.path.exists(fai):
+        with open(fai) as fh:
+            return sum(int(line.split("\t")[1]) for line in fh if line.strip())
+    total = 0
+    with open(fasta_path, "rb") as fh:
+        for line in fh:
+            if not line.startswith(b">"):
+                total += len(line.strip())
+    return total

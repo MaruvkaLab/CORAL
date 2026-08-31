@@ -1,12 +1,19 @@
 import textwrap
 
+import numpy as np
+
 from coral.repeat_masker import RepeatMask, _merge
 
 
+def _merged(ivs):
+    s, e = _merge(np.asarray(ivs, dtype=np.int64).reshape(-1, 2))
+    return list(zip(s.tolist(), e.tolist()))
+
+
 def test_merge_touching_and_overlapping():
-    assert _merge([(10, 20), (21, 30)]) == [(10, 30)]      # adjacent -> merged
-    assert _merge([(10, 20), (15, 25)]) == [(10, 25)]      # overlapping
-    assert _merge([(50, 60), (10, 20)]) == [(10, 20), (50, 60)]  # sorted, disjoint
+    assert _merged([(10, 20), (21, 30)]) == [(10, 30)]      # adjacent -> merged
+    assert _merged([(10, 20), (15, 25)]) == [(10, 25)]      # overlapping
+    assert _merged([(50, 60), (10, 20)]) == [(10, 20), (50, 60)]  # sorted, disjoint
 
 
 def test_contains_and_fraction():
