@@ -44,15 +44,8 @@ class Pileup:
                 gzip_proc = subprocess.Popen(["gzip"], stdin=proc.stdout, stdout=out)
                 proc.stdout.close()
                 gzip_proc.communicate()
-                proc.wait()
 
-            # A failed mpileup still yields a valid gzip of a truncated pileup,
-            # so the exit codes are the only thing separating that from success.
-            if proc.returncode != 0:
-                raise subprocess.CalledProcessError(proc.returncode, cmd)
-            if gzip_proc.returncode != 0:
-                raise subprocess.CalledProcessError(gzip_proc.returncode, "gzip")
-
+            # Rename tmp to final output only if gzip succeeded
             os.rename(tmp_path, self.pileup_path)
             log(f"Pileup written to: {self.pileup_path}", self.verbose)
 

@@ -1,9 +1,7 @@
 import os
-import sys
 import subprocess
 import shutil
-from itertools import chain
-from .utils import run_cmd, run_cmd_retry, log
+from .utils import run_cmd, log
 from Bio import SeqIO
 
 
@@ -18,8 +16,6 @@ class Genome:
         self.fasta_path = fasta_path if fasta_path else os.path.join(self.output_dir, f"{name}.fasta")
         self.fastq_path = None
         self.verbose = verbose
-        self.n_contigs = None   # set when the FASTA is parsed for fragmentation
-        self.total_bp = None
 
     def download(self):
         if os.path.exists(self.fasta_path) and not self.no_cache:
@@ -32,18 +28,10 @@ class Genome:
 
         log(f"Downloading genome for {self.name} ({self.accession})", self.verbose)
         zip_path = os.path.join(temp_dir, f"{self.name}.zip")
-        download_cmd = [
+        run_cmd([
             "datasets", "download", "genome", "accession", self.accession,
             "--filename", zip_path
-        ]
-        # Removes the progress bar if stderr is not a TTY (e.g., when running in a non-interactive environment)
-        if not sys.stderr.isatty():
-            download_cmd.append("--no-progressbar")
-        # Raises NCBI's per-IP rate limit (3 -> 10 req/s) when a key is available
-        api_key = os.environ.get("NCBI_API_KEY")
-        if api_key:
-            download_cmd += ["--api-key", api_key]
-        run_cmd_retry(download_cmd, verbose=self.verbose)
+        ], verbose=self.verbose)
 
         log("Unzipping genome...", self.verbose)
         run_cmd(["unzip", "-q", "-o", zip_path, "-d", temp_dir], verbose=self.verbose)
@@ -92,8 +80,8 @@ class Genome:
         # ---- BWA family explicit indexing ----
 
         if aligner == "bwa-mem2":
-            # bwa-mem2 writes no .sa; requiring one would re-index on every run
-            required_exts = ["0123", "amb", "ann", "bwt.2bit.64", "pac"]
+            # bwa-mem2 index files
+            required_exts = ["bwt.2bit.64", "pac", "sa"]
             index_cmd = ["bwa-mem2", "index", self.fasta_path]
         else:
             # classic bwa index files
@@ -124,49 +112,36 @@ class Genome:
         log(f"Indexing complete for {self.name}", self.verbose)
 
 
-    def generate_fragment_fastq(self, length=150, output_fastq = None, offset=75, force=False,
-                                repeat_mask=None, mask_frac=0.5):
+    def generate_fragment_fastq(self, length=150, output_fastq = None, offset=75, force=False):
         output_fastq = output_fastq if output_fastq else os.path.join(self.output_dir, f"{self.name}.fastq")
-
+        
         if os.path.exists(output_fastq) and not force:
             log(f"Fastq for {self.name} already exists. Skipping.", self.verbose)
             self.fastq_path = output_fastq
             return output_fastq
 
 
-        # If a repeat mask is given, don't emit a fragment that is >= mask_frac
-        # repeat: those reads carry no clean orthologous signal and mostly seed
-        # paralog/repeat mis-mappings. Fragment span is 1-based inclusive.
-        self.n_contigs = self.total_bp = 0
-        written = skipped = 0
+        def split_sequence(seq, offset, section_size):
+            last_start = len(seq) - section_size
+            sections = [(i, seq[i:i+section_size]) for i in range(0, last_start, offset)]
+            if last_start > 0:
+                sections.append((last_start, seq[last_start:]))
+            return sections
+
+        chromosomes = {
+            record.id: record.seq
+            for record in SeqIO.parse(self.fasta_path, "fasta")
+        }
+
         with open(output_fastq, 'w') as out:
-            for record in SeqIO.parse(self.fasta_path, "fasta"):
-                chrom_name = record.id
-                sequence = str(record.seq)
-                self.n_contigs += 1
-                self.total_bp += len(sequence)
-
-                last_start = len(sequence) - length
-                starts = range(0, last_start, offset)
-                if last_start > 0:
-                    starts = chain(starts, (last_start,))
-
-                for start in starts:
-                    frag = sequence[start:start + length]
+            for chrom_name, sequence in chromosomes.items():
+                for i, (start, frag) in enumerate(split_sequence(sequence, offset, length)):
                     end = start + len(frag) - 1
-                    if repeat_mask and repeat_mask.masked_fraction(chrom_name, start + 1, end + 1) >= mask_frac:
-                        skipped += 1
-                        continue
                     out.write(f"@{chrom_name}_{start+1}_{end+1}\n")
                     out.write(f"{frag}\n+\n")
                     out.write(f"{'I' * len(frag)}\n")
-                    written += 1
 
-        if repeat_mask:
-            log(f"Wrote {output_fastq} ({written} fragments; {skipped} skipped as "
-                f">={mask_frac:.0%} repeat)", self.verbose)
-        else:
-            log(f"Wrote {output_fastq}", self.verbose)
+        log(f"Wrote {output_fastq}", self.verbose)
         self.fastq_path = output_fastq
         return output_fastq
 

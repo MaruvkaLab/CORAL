@@ -3,6 +3,7 @@ import json
 import os
 import sys
 from .pipeline import MutationExtractionPipeline, MultiSpeciesMutationPipeline
+from .run_phylip import run_phylip
 
 def main():
     parser = argparse.ArgumentParser(description="Species Mutation Extraction CLI")
@@ -19,7 +20,7 @@ def main():
     verbose_group.add_argument("--quiet", dest="verbose", action="store_false", help="Disable verbose logging")
     single.set_defaults(verbose=True)
     single.add_argument("--suffix", default=None)
-    single.add_argument("--aligner-name", default="bwa-mem2")
+    single.add_argument("--aligner-name", default="bwa")
     single.add_argument("--aligner-cmd", default=None)
     single.add_argument("--streamed", action="store_true")
     single.add_argument("--mapq", type=int, default=60)
@@ -29,17 +30,8 @@ def main():
     continuity_group.add_argument("--no-continuity", dest="continuity", action="store_false", help="Disable continuity mode")
     single.add_argument("--cores", type=int, default=None)
     single.add_argument("--divergence-time", type=int, default=None)
-    single.add_argument("--no-plots", dest="plots", action="store_false", default=True,
-                        help="Skip the plotting stage (saves time and a lot of small PNG files)")
     single.add_argument("--five-mer", dest="five_mer", action="store_true",
                         help="Also extract 5-mer mutation contexts (adds a full pileup pass; off by default)")
-    single.add_argument("--repeat-mask", dest="repeat_mask", nargs="?", const="windowmasker",
-                        default=None, choices=["windowmasker", "repeatmasker"], metavar="TOOL",
-                        help="Mask repeats: skip pseudo-reads from species repeats and calls at "
-                             "reference repeat positions. Off unless given; TOOL is windowmasker "
-                             "(default, library-free) or repeatmasker")
-    single.add_argument("--repeat-species", dest="repeat_species", default=None, metavar="CLADE",
-                        help="RepeatMasker library clade (e.g. 'drosophila'); only with --repeat-mask repeatmasker")
 
     multi = subparsers.add_parser("run_multi", help="Run multi-species pipeline from Newick")
     multi.add_argument("--newick-tree", default=None)
@@ -51,7 +43,7 @@ def main():
     verbose_group_multi.add_argument("--quiet", dest="verbose", action="store_false", help="Disable verbose logging")
     multi.set_defaults(verbose=True)
     multi.add_argument("--outgroup", default=None)
-    multi.add_argument("--aligner-name", default="bwa-mem2")
+    multi.add_argument("--aligner-name", default="bwa")
     multi.add_argument("--aligner-cmd", default=None)
     multi.add_argument("--streamed", action="store_true")
     continuity_group_multi = multi.add_mutually_exclusive_group()
@@ -60,7 +52,27 @@ def main():
     multi.add_argument("--run-id", default=None)
     multi.add_argument("--mapq", type=int, default=60)
     multi.add_argument("--low-mapq", type=int, default=1)
-    multi.add_argument("--cores", type=int, default=None)
+    multi.add_argument("--cores", type=int, default=None,
+                       help="Cores to use. Default: auto-detected from the process affinity "
+                            "mask (on HTCondor, what the slot granted). --cores 1 runs "
+                            "everything serially.")
+
+    # --- parallelism (run_multi is parallel by default; these switch it off) ---
+    multi.add_argument("--no-parallel", action="store_true",
+                       help="Run the original serial stages: whole-genome pileup, "
+                            "serial scan, recursive per-row Fitch.")
+    multi.add_argument("--align-jobs", type=int, default=None,
+                       help="Species aligned concurrently; each gets cores/jobs threads. "
+                            "1 disables this stage's parallelism.")
+    multi.add_argument("--scan-jobs", type=int, default=None,
+                       help="Chromosomes scanned concurrently. 1 disables this stage's "
+                            "parallelism, which also restores the whole-genome pileup.")
+    multi.add_argument("--fitch-jobs", type=int, default=None,
+                       help="Workers for the Fitch pass. 1 runs the recursive per-row "
+                            "implementation.")
+    multi.add_argument("--max-memory-mb", type=int, default=None,
+                       help="Memory budget for the whole run. Caps the worker count of "
+                            "each stage. On HTCondor, match request_memory.")
 
     # === Run PHYLIP ===
     phylip = subparsers.add_parser("run_phylip", help="Run PHYLIP on mutation matrix")
@@ -95,10 +107,6 @@ def main():
                 continuity=args.continuity,
                 divergence_time=args.divergence_time,
                 five_mer=args.five_mer,
-                plots=args.plots,
-                repeat_mask=bool(args.repeat_mask),
-                repeat_masker=args.repeat_mask or "windowmasker",
-                repeat_species=args.repeat_species,
             )
             pipeline.run()
 
@@ -118,11 +126,15 @@ def main():
                 low_mapq=args.low_mapq,
                 cores=args.cores,
                 continuity=args.continuity,
+                no_parallel=args.no_parallel,
+                align_jobs=args.align_jobs,
+                scan_jobs=args.scan_jobs,
+                fitch_jobs=args.fitch_jobs,
+                max_memory_mb=args.max_memory_mb,
             )
             pipeline.run()
 
         elif args.subcmd == "run_phylip":
-            from .run_phylip import run_phylip
             with open(args.mapping) as f:
                 mapping = json.load(f)
             run_phylip(

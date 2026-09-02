@@ -4,13 +4,13 @@ import random
 import re
 import pandas as pd
 from io import StringIO
+from ete3 import Tree
 import sys
 import os
 import json
 from .utils import log
 
 def parse_species_accession_from_newick(newick_str):
-    from ete3 import Tree
     tree = Tree(newick_str, format=1)
     species_accession_dict = {}
     for leaf in tree.iter_leaves():
@@ -37,7 +37,6 @@ def parse_species_accession_from_newick(newick_str):
 
 
 def annotate_tree_with_indices(newick_str, outgroup_name, file_path=None, verbose=True):
-    from ete3 import Tree
     tree = Tree(newick_str, format=1)
 
     # Normalize leaf names
@@ -61,8 +60,9 @@ def annotate_tree_with_indices(newick_str, outgroup_name, file_path=None, verbos
     for node in tree.traverse("postorder"):
         if not node.is_leaf():
             node.add_feature("index", next_internal_idx)
-            node.add_feature("custom_name", f"Node({next_internal_idx})")
+            node.add_feature("custom_name", f"Node{next_internal_idx}")
             next_internal_idx += 1
+            
 
     if file_path is not None:
         original_names = {}
@@ -108,6 +108,126 @@ def annotate_list_with_indices(species_list, outgroup_name, file_path=None, verb
 
     return sorted_terminals, terminal_mapping
 
+# Add functions to create mutation spectra from PHYLIP output files.
+# and to collapse complementary mutations into a single representation.
+
+def parse_phylip_edges(outfile_path):
+    """Edges from the 'between / and / length' table of a dnapars outfile."""
+    text = open(outfile_path).read()
+    m = re.search(r"between\s+and\s+length\s*\n(.*?)\n\s*\n", text, re.S)
+    if m is None:
+        raise ValueError(f"No 'between/and/length' table in {outfile_path} "
+                         f"(did you pass the .outtree instead of the .outfile?)")
+    edges = []
+    for line in m.group(1).strip().splitlines():
+        p = line.split()
+        # keep only real endpoints: an integer (interior) or 'taxaN' (tip)
+        if len(p) >= 2 and re.fullmatch(r"\d+|taxa\d+", p[0]) and re.fullmatch(r"\d+|taxa\d+", p[1]):
+            edges.append((p[0], p[1]))
+    return edges
+
+def phylip_interior_clades(edges, outgroup_label):
+    """{interior_number: frozenset(descendant tip labels)} when rooted on the outgroup tip."""
+    adj = defaultdict(list)
+    for a, b in edges:
+        adj[a].append(b); adj[b].append(a)
+    clades = {}
+    def dfs(node, parent):
+        s = {node} if node.startswith("taxa") else set()
+        for nb in adj[node]:
+            if nb != parent:
+                s |= dfs(nb, node)
+        clades[node] = frozenset(s)
+        return s
+    dfs(outgroup_label, None)
+    return {n: c for n, c in clades.items() if not n.startswith("taxa")}
+
+
+def read_phylip_outtree_newick(outtree_path, verbose=True):
+    r"""
+    The first newick string in a PHYLIP .outtree, as a string.
+
+    dnapars run WITH a user tree (the 'U' option, see run_phylip.py) prefixes the
+    file with a tree-count line -- "1\n(taxa0:0.01447,...);" -- which ete3 cannot
+    parse; the no-tree run writes the newick directly. Left unhandled, that single
+    line aborts run_multi right after PHYLIP, so a tree-given run stops before
+    Fitch and never writes Mutations/, Tables/, Plots/ or mutation_spectras.tsv.
+
+    Take everything from the first '(' through the first ';', and drop the line
+    wrapping PHYLIP applies at ~70 columns. Dropping whitespace is safe here
+    because every label PHYLIP writes is 'taxaN'.
+    """
+    text = open(outtree_path).read()
+
+    start = text.find("(")
+    if start == -1:
+        raise ValueError(f"No newick tree found in {outtree_path}")
+    end = text.find(";", start)
+    if end == -1:
+        raise ValueError(f"Unterminated newick tree in {outtree_path} "
+                         f"(no ';' after the opening '(')")
+
+    if text[end + 1:].strip():
+        log(f"{outtree_path} holds more than one tree; using the first.", verbose)
+
+    return "".join(text[start:end + 1].split())
+
+
+def tree_from_phylip_outtree(outtree_path, terminal_mapping, outgroup_name):
+    """
+    Turn PHYLIP's inferred tree (leaves labeled 'taxa0'..'taxaN', UNROOTED)
+    into a tree annotated for Fitch, WITHOUT re-sorting indices — so it stays
+    aligned with the columns already in matching_bases.csv.gz.
+
+    terminal_mapping must be the in-memory mapping (int idx -> name AND
+    name -> int idx), i.e. self.terminal_mapping, not the JSON-reloaded one.
+    """
+    # NOT Tree(outtree_path): the user-tree outtree carries a leading count line.
+    newick = read_phylip_outtree_newick(outtree_path)
+    try:
+        tree = Tree(newick, format=1)
+    except Exception as exc:
+        raise ValueError(
+            f"Could not parse the PHYLIP tree in {outtree_path}: {exc}\n"
+            f"newick read: {newick[:200]}"
+        ) from exc
+
+    # 1) taxaN  ->  species name
+    for leaf in tree.iter_leaves():
+        idx = int(leaf.name.replace("taxa", ""))
+        leaf.name = terminal_mapping[idx]
+
+    # 2) PHYLIP tree is unrooted -> root on the outgroup so Fitch has polarity
+    tree.set_outgroup(tree & outgroup_name)
+
+    # 3) annotate using the EXISTING mapping (do NOT call annotate_tree_with_indices() here,
+    #    because it sorts alphabetically and would desync leaf indices from the CSV columns)
+    for leaf in tree.iter_leaves():
+        leaf.add_feature("index", terminal_mapping[leaf.name])
+        leaf.add_feature("custom_name", leaf.name)
+
+    """
+    next_idx = sum(1 for _ in tree.iter_leaves())
+    for node in tree.traverse("postorder"):
+        if not node.is_leaf():
+            node.add_feature("index", next_idx)
+            node.add_feature("custom_name", f"Node({next_idx})")
+            next_idx += 1
+    """
+    outfile_path = outtree_path.replace(".outtree", ".outfile")   # the table lives in .outfile
+    edges = parse_phylip_edges(outfile_path)
+    clades = phylip_interior_clades(edges, f"taxa{terminal_mapping[outgroup_name]}")
+    next_idx = sum(1 for _ in tree.iter_leaves())
+    for node in tree.traverse("postorder"):
+        if not node.is_leaf():
+            clade = frozenset(f"taxa{terminal_mapping[l.name]}" for l in node.iter_leaves())
+            match = next((n for n, c in clades.items() if c == clade), None)
+            node.add_feature("index", next_idx); next_idx += 1        # keep a unique index
+            node.add_feature("custom_name",
+                             match if match is not None
+                             else ("ROOT" if node.is_root() else f"Node({next_idx-1})"))
+
+    return tree
 
 def save_annotated_tree(tree, path):
     original_names = {}
@@ -164,3 +284,43 @@ mutation_pattern = re.compile(r"^[ACGT]\[[ACGT]>[ACGT]\][ACGT]$")
 def filter_mutations_dict(d):
     return {k: v for k, v in d.items() if mutation_pattern.match(k)}
 
+
+
+
+valid_bases = {'A', 'C', 'G', 'T'}
+
+def collapse_triplets(triplet_dict):
+    """Pyrimidine-centric fold: reverse-complement a triplet whose CENTER base
+    (triplet[1]) is a purine (G/A). Mirror of MutationNormalizer.collapse_triplets
+    so collapsed triplet keys line up with collapsed mutation keys."""
+    collapsed = defaultdict(int)
+    for triplet, count in triplet_dict.items():
+        if triplet[1] in {'G', 'A'}:
+            rc = ''.join(complement.get(nuc, nuc) for nuc in reversed(triplet))
+            collapsed[rc] += int(count)
+        else:
+            collapsed[triplet] += int(count)
+    return collapsed
+
+def filter_triplets_dict(d):
+    """Drop triplets containing 'N' or any non-ACGT char. Mirror of
+    MutationNormalizer.filter_triplets_dict."""
+    return {k: v for k, v in d.items() if 'N' not in k and all(x in valid_bases for x in k)}
+
+def normalize_by_triplets(mutations, triplets):
+    """Divide each collapsed mutation count by its trinucleotide context count
+    ('X[R>A]Y' -> key 'XRY' = k[0]+k[2]+k[-1]); 0 when context unseen. Mirror of
+    MutationNormalizer.normalize_by_triplets."""
+    out = {}
+    for k, v in mutations.items():
+        denom = triplets.get(f"{k[0]}{k[2]}{k[-1]}", 0)
+        out[k] = v / denom if denom > 0 else 0
+    return out
+
+def scale_counts(d, target_sum=10000):
+    """Rescale a count dict to sum to target_sum (0 when empty). Mirror of
+    MutationNormalizer.scale_counts."""
+    total = sum(d.values())
+    if total == 0:
+        return {k: 0 for k in d}
+    return {k: round(v / total * target_sum) for k, v in d.items()}

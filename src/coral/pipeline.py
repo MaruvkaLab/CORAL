@@ -2,15 +2,8 @@
 
 import json
 import os
-import re
-import subprocess
-import time
+import time 
 import gc
-
-try:
-    import resource
-except ImportError:
-    resource = None
 
 import pandas as pd
 from .cleanup_manager import PipelineCleaner
@@ -18,67 +11,25 @@ from .genome_manager import Genome
 from .alignment_manager import Aligner
 from .multiple_species_mutation_extractor_manager import MultipleSpeciesMutationExtractor
 from .mutation_extractor_manager import FiveMerExtractor, MutationExtractor, MutationNormalizer, ParallelMutationExtractor, TripletExtractor
+from . import parallel_alignment
+from .parallel_resources import resolve_cores
 from .pileup_manager import Pileup
 from .plot_utils import CoveragePlotter, MutationDensityPlotter, MutationSpectraPlotter
 from .utils import get_top_n_chromosomes, log
-from .repeat_masker import build_mask
 import psutil
 import pysam
-
-
-def _cpu_seconds():
-    """CPU seconds used by this process and all its children, or None."""
-    if resource is None:
-        return None
-    s = resource.getrusage(resource.RUSAGE_SELF)
-    c = resource.getrusage(resource.RUSAGE_CHILDREN)
-    return s.ru_utime + s.ru_stime + c.ru_utime + c.ru_stime
-
-
-def _tool_versions():
-    def pick(name, lines):
-        if not lines:
-            return None
-        if name == "bwa-mem2":  # bare version on stdout, loader chatter on stderr
-            return next((l for l in lines if re.match(r'^\d+\.\d+', l)), lines[0])
-        # bwa prints "Version: x"; samtools prints "samtools x" first
-        return next((l for l in lines if "ersion" in l), lines[0])
-
-    versions = {}
-    for name, cmd in (("samtools", ["samtools", "--version"]),
-                      ("bwa", ["bwa"]),
-                      ("bwa-mem2", ["bwa-mem2", "version"])):
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            lines = [l.strip() for l in ((r.stdout or "") + (r.stderr or "")).splitlines() if l.strip()]
-            found = pick(name, lines)
-            if found:
-                versions[name] = found
-        except Exception:
-            pass
-    try:
-        from importlib.metadata import version
-        versions["coral"] = version("coral")
-    except Exception:
-        pass
-    return versions
-
 
 class MutationExtractionPipeline:
     def __init__(self, 
                  species_list,
                  outgroup,
-                 aligner_name="bwa-mem2", 
+                 aligner_name="bwa", 
                  aligner_cmd=None,
                  base_output_dir="../Output", 
                  no_cache = False,
                  verbose = True, 
                  run_id = None,
                  **kwargs):
-        if len(species_list) != 2:
-            raise ValueError(
-                f"MutationExtractionPipeline needs exactly 2 ingroup species, got {len(species_list)}. "
-                "Use MultiSpeciesMutationPipeline for more.")
         self.species_list = species_list  # list of (name, accession)
         self.outgroup = outgroup          # (name, accession)
         self.aligner_name = aligner_name
@@ -98,30 +49,13 @@ class MutationExtractionPipeline:
         self.reference = None
         self.genomes = []
         self.alignments = []
-        self.align_times = {}
-        self.genome_stats = {}
-        self.reference_mask = None    # RepeatMask on the outgroup, if --repeat-mask
         self.verbose = verbose
         self.no_cache = no_cache
-
-    def _build_repeat_mask(self, genome):
-        """Build (cached) a repeat mask for `genome` if --repeat-mask is on, else
-        None. Uses WindowMasker by default (library-free); RepeatMasker if selected."""
-        if not self.params.get("repeat_mask", False):
-            return None
-        return build_mask(
-            genome.fasta_path, genome.output_dir,
-            tool=self.params.get("repeat_masker", "windowmasker"),
-            species=self.params.get("repeat_species"),
-            cores=self.params.get("cores", 1) or 1,
-            dust=self.params.get("repeat_dust", True),
-            no_cache=self.no_cache, verbose=self.verbose)
 
     
     def run(self):
         log("Starting mutation extraction pipeline...", self.verbose)
         timings = {}
-        cpu_times = {}
         memory_log = {}
         process = psutil.Process(os.getpid())
         start_pipeline = time.time()
@@ -133,16 +67,12 @@ class MutationExtractionPipeline:
             log(f"--- Starting: {stage_name} ---", self.verbose)
             mem_before = get_memory()
             start = time.time()
-            cpu_before = _cpu_seconds()
             func()
             gc.collect()  # Clean up memory after each stage
             end = time.time()
             mem_after = get_memory()
-            cpu_after = _cpu_seconds()
 
             timings[stage_name] = round(end - start, 2)
-            if cpu_before is not None:
-                cpu_times[stage_name] = round(cpu_after - cpu_before, 2)
             memory_log[stage_name] = {"start_MB": mem_before, "end_MB": mem_after}
             log(f"{stage_name} completed in {timings[stage_name]} seconds", self.verbose)
             log(f"Memory usage: {mem_before} → {mem_after} MB", self.verbose)
@@ -152,9 +82,7 @@ class MutationExtractionPipeline:
         timed_stage("Generate Pileup", self.generate_pileup)
         timed_stage("Extract Mutations and Triplets", self.extract_mutations_and_triplets)
         timed_stage("Extract Intervals", self.extract_intervals)
-        if self.params.get("plots", True):
-            timed_stage("Run Plots", self.run_plots)
-        self.genome_stats = self._collect_genome_stats()  # before cleanup removes the FASTAs
+        timed_stage("Run Plots", self.run_plots)
         timed_stage("Cleanup files", self.cleanup)
 
         total_runtime = round(time.time() - start_pipeline, 2)
@@ -165,66 +93,9 @@ class MutationExtractionPipeline:
         with open(timing_path, "w") as f:
             json.dump({"timings": timings, "memory": memory_log}, f, indent=2)
 
-        try:
-            self._write_run_summary(timings, cpu_times)
-        except Exception as e:  # diagnostics must never fail a completed run
-            log(f"Warning: could not write run summary: {e}", self.verbose)
-
         log(f"Timing and memory info saved to: {timing_path}", self.verbose)
         log("Pipeline completed successfully.", self.verbose)
 
-
-    def _collect_genome_stats(self):
-        stats = {}
-        for genome in ([self.reference] if self.reference else []) + self.genomes:
-            entry = {"accession": genome.accession}
-            fai = genome.fasta_path + ".fai"
-            if os.path.exists(fai):
-                with open(fai) as f:
-                    lengths = [int(line.split('\t')[1]) for line in f if line.strip()]
-                entry["contigs"] = len(lengths)
-                entry["total_bp"] = sum(lengths)
-            elif genome.total_bp is not None:
-                entry["contigs"] = genome.n_contigs
-                entry["total_bp"] = genome.total_bp
-            elif os.path.exists(genome.fasta_path):
-                entry["fasta_bytes"] = os.path.getsize(genome.fasta_path)
-            stats[genome.name] = entry
-        return stats
-
-    def _write_run_summary(self, timings, cpu_times):
-        path = os.path.join(self.output_dir, "run_summary.json")
-        data = {}
-        if os.path.exists(path):
-            try:
-                with open(path) as f:
-                    data = json.load(f)
-            except (ValueError, OSError):
-                data = {}
-
-        data["run"] = {
-            "run_id": self.run_id,
-            "outgroup": self.outgroup[0],
-            "taxa": [name for name, _ in self.species_list],
-            "parameters": {k: v for k, v in self.params.items()
-                           if v is None or isinstance(v, (str, int, float, bool))},
-            "versions": _tool_versions(),
-        }
-        data["genomes"] = getattr(self, "genome_stats", {})
-        alignment = {a.species: a.filter_stats for a in self.alignments if a.filter_stats}
-        if alignment:
-            data["alignment"] = alignment
-        data["timings"] = {
-            "wall_seconds": timings,
-            "cpu_seconds": cpu_times,
-            "alignment_wall_seconds": getattr(self, "align_times", {}),
-        }
-
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, path)
-        log(f"Run summary saved to: {path}", self.verbose)
 
     def download_index_and_fragment_genomes(self):
         # log("Downloading, indexing, and fragmenting genomes...", self.verbose)
@@ -240,8 +111,6 @@ class MutationExtractionPipeline:
         )
         self.reference.download()
         self.reference.index(aligner=self.aligner_name)
-        # Outgroup repeat mask -> used to drop calls at reference repeat positions.
-        self.reference_mask = self._build_repeat_mask(self.reference)
 
         # Ingroup genomes
         for name, acc in self.species_list:
@@ -253,14 +122,7 @@ class MutationExtractionPipeline:
                 verbose=self.verbose
             )
             genome.download()
-            # Species repeat mask -> don't even generate pseudo-reads from repeats.
-            species_mask = self._build_repeat_mask(genome)
-            genome.generate_fragment_fastq(
-                length=self.params.get("fragment_length", 150),
-                offset=self.params.get("fragment_offset", 75),
-                force=self.no_cache,
-                repeat_mask=species_mask,
-                mask_frac=self.params.get("repeat_mask_frac", 0.5))
+            genome.generate_fragment_fastq(length=self.params.get("fragment_length", 150), offset=self.params.get("fragment_offset", 75), force=self.no_cache)
             self.genomes.append(genome)
 
     def align_species(self):
@@ -277,7 +139,6 @@ class MutationExtractionPipeline:
                 verbose=self.verbose,
             )
 
-            t0 = time.time()
             if self.params.get("streamed", False):
                 aligner.align_streamed(
                     mapq=self.params.get("mapq", 60),
@@ -291,7 +152,6 @@ class MutationExtractionPipeline:
                     low_mapq=self.params.get("low_mapq", 1),
                     continuity=self.params.get("continuity", True)
                 )
-            self.align_times[genome.name] = round(time.time() - t0, 2)
             self.alignments.append(aligner)
             
 
@@ -348,9 +208,8 @@ class MutationExtractionPipeline:
                 fai_path=self.reference.fasta_path + ".fai",
                 cores=cores,
                 no_full_mutations=False,
-                no_cache=self.no_cache,
-                verbose=self.verbose,
-                ref_mask=self.reference_mask)
+                no_cache=False,
+                verbose=self.verbose)
         else:
             mutation_extractor = MutationExtractor(
                 reference=self.reference.name,
@@ -360,9 +219,8 @@ class MutationExtractionPipeline:
                 mutation_output_dir=mut_dir,
                 triplet_output_dir=trip_dir,
                 no_full_mutations=False,
-                no_cache=self.no_cache,
-                verbose=self.verbose,
-                ref_mask=self.reference_mask)
+                no_cache=False,
+                verbose=self.verbose)
         mutation_extractor.extract()
 
         # 5-mer extraction is an extra full pass over the pileup and is not used
@@ -374,7 +232,7 @@ class MutationExtractionPipeline:
                                   taxon2=self.genomes[1].name,
                                   pileup_file=self.pileup_path,
                                   output_dir=os.path.join(self.output_dir, 'Mutations'),
-                                  no_cache=self.no_cache,
+                                  no_cache=False,
                                   verbose=self.verbose)
             fivemer_extractor.extract()
 
@@ -391,12 +249,12 @@ class MutationExtractionPipeline:
         normalizer = MutationNormalizer(
             input_dir=self.output_dir,
             output_dir= os.path.join(self.output_dir, "Tables"),
-            verbose=self.verbose,
+            verbose=True,
             divergence_time= self.params.get("divergence_time", None),
         )
         normalizer.normalize()
 
-    def _extract_bam_intervals(self, input_bam, output_dir, assume_sorted=False, merge=False, no_cache=False):
+    def _extract_bam_intervals(self, input_bam, output_dir, sorted=False, merge=False, no_cache=False):
             os.makedirs(output_dir, exist_ok=True)
 
             base_name = os.path.basename(input_bam).rsplit(".", 1)[0]
@@ -405,6 +263,8 @@ class MutationExtractionPipeline:
             if os.path.exists(output_file) and not no_cache:
                 log(f"Intervals already exist: {output_file}", self.verbose)
                 return output_file
+
+            bamfile = pysam.AlignmentFile(input_bam, "rb")
 
             def extract_raw_intervals(bamfile):
                 intervals = []
@@ -437,13 +297,12 @@ class MutationExtractionPipeline:
                         merged.append((chrom, start, end))
                 return merged
 
-            with pysam.AlignmentFile(input_bam, "rb") as bamfile:
-                intervals = (
-                    extract_intervals_sorted(bamfile)
-                    if assume_sorted
-                    else merge_intervals(extract_raw_intervals(bamfile)) if merge
-                    else extract_raw_intervals(bamfile)
-                )
+            intervals = (
+                extract_intervals_sorted(bamfile)
+                if sorted
+                else merge_intervals(extract_raw_intervals(bamfile)) if merge
+                else extract_raw_intervals(bamfile)
+            )
 
             df = pd.DataFrame(intervals, columns=["chromosome", "start", "end"])
             df.to_csv(output_file, sep='\t', index=False, compression="gzip")
@@ -453,8 +312,7 @@ class MutationExtractionPipeline:
     
     def extract_intervals(self):
         for bam in self.alignments:
-            self._extract_bam_intervals(bam.final_bam, os.path.join(self.output_dir, 'Intervals'),
-                                        no_cache=self.no_cache)
+            self._extract_bam_intervals(bam.final_bam, os.path.join(self.output_dir, 'Intervals'))    
 
     def run_plots(self):
         spectra_plotter = MutationSpectraPlotter()
@@ -482,7 +340,7 @@ class MutationExtractionPipeline:
                                  mutation_category = r"[ACTG][C>T]G")
             
     def cleanup(self):
-        cleaner = PipelineCleaner(self.genomes + [self.reference], self.alignments, self.pileup, base_dir=self.output_dir, verbose=self.verbose)
+        cleaner = PipelineCleaner(self.genomes + [self.reference], self.alignments, self.pileup, base_dir=self.output_dir, verbose=True)
         cleaner.run(bams=True, pileup=True, genomes=True)
 
 
@@ -491,11 +349,28 @@ from .multiple_species_utils import (
     parse_species_accession_from_newick,
     annotate_tree_with_indices,
     save_annotated_tree,
+    tree_from_phylip_outtree,
 )
 from .run_phylip import run_phylip, check_phylip_available
 
 
 class MultiSpeciesMutationPipeline:
+    """The multi-species pipeline, with parallel implementations of its three
+    single-threaded bottlenecks: alignment, the pileup scan, and Fitch.
+
+    Parallelism is the **default** here: with no ``cores`` given the count is
+    auto-detected from the process affinity mask (which on HTCondor is what the
+    slot actually granted). It is switched off explicitly:
+
+    * ``no_parallel=True`` or ``cores=1`` -- every stage takes its original
+      serial path, including the whole-genome pileup the serial scan reads from.
+    * ``align_jobs=1`` / ``scan_jobs=1`` / ``fitch_jobs=1`` -- switch off one
+      stage, for debugging or when memory is tight.
+
+    ``dnapars`` (``_reconstruct_phylogeny``) is inherently single-threaded and
+    stays the residual serial cost of a long ``run_multi``.
+    """
+
     def __init__(
         self,
         newick_tree = None,
@@ -503,10 +378,16 @@ class MultiSpeciesMutationPipeline:
         base_output_dir="../Output",
         run_id=None,
         outgroup=None,
-        aligner_name="bwa-mem2", 
+        aligner_name="bwa", 
         aligner_cmd=None,
         no_cache=False,
         verbose=True,
+        cores=None,
+        no_parallel=False,
+        align_jobs=None,
+        scan_jobs=None,
+        fitch_jobs=None,
+        max_memory_mb=None,
         **kwargs,
     ):
         if newick_tree is None and species_list is None:
@@ -520,6 +401,17 @@ class MultiSpeciesMutationPipeline:
         self.aligner_cmd=aligner_cmd
         self.no_cache = no_cache
         self.verbose = verbose
+
+        self.requested_cores = cores
+        self.cores = resolve_cores(cores)
+        self.no_parallel = no_parallel
+        self.align_jobs = align_jobs
+        self.scan_jobs = scan_jobs
+        self.fitch_jobs = fitch_jobs
+        self.max_memory_mb = max_memory_mb
+        # The resolved count is what the stages read, so `bwa -t` matches the
+        # budget we actually planned around rather than an unset None.
+        kwargs["cores"] = self.cores
         self.params = kwargs
 
         self.outgroup_name = outgroup
@@ -533,16 +425,35 @@ class MultiSpeciesMutationPipeline:
 
         os.makedirs(self.output_dir, exist_ok=True)
 
-    def run(self):
-        log("Starting multi-species mutation extraction pipeline...", self.verbose)
-        # Checked up front: the alignment and extraction below take hours, and the
-        # run is useless without PHYLIP for the final reconstruction.
-        if not check_phylip_available('dnapars'):
-            raise RuntimeError(
-                "PHYLIP is required for multi-species phylogenetic reconstruction but was not found.\n"
-                "Please install PHYLIP via conda: `conda install -c bioconda phylip`"
-            )
+    @property
+    def parallel(self):
+        """True when this run should use the parallel stages at all."""
+        return (not self.no_parallel) and self.cores > 1
 
+    def _stage_parallel(self, jobs):
+        """True when one stage should be parallel (``jobs=1`` switches it off)."""
+        return self.parallel and (jobs is None or jobs > 1)
+
+    def run(self):
+        if self.parallel:
+            log(f"{self.cores} core(s) available; parallel stages enabled "
+                f"(align_jobs={self.align_jobs or 'auto'}, "
+                f"scan_jobs={self.scan_jobs or 'auto'}, "
+                f"fitch_jobs={self.fitch_jobs or 'auto'}).", self.verbose)
+        else:
+            log("Parallelism disabled; running the serial stages.", self.verbose)
+
+        # 1. If run_tree is provided, fix the nodes numbers, as done with no_tree
+        """
+        2. Create json file from Mutations csv.gz files
+        like in mutation_extractor_manager.py ParallelMutationExtractor extract
+        3. Create a triplet table
+        like in mutation_extractor_manager.py TripletExtractor extract
+        3. Create Tables directory with normalized_scaled.tsv, collapsed_mutations.tsv, scaled_raw.tsv and triplets.tsv files 
+        like in mutation_extractor_manager.py MutationNormalizer normalize"""
+
+
+        log("Starting multi-species mutation extraction pipeline...", self.verbose)
         if self.newick_tree:
             self.parse_and_annotate_tree()
         else:
@@ -550,22 +461,54 @@ class MultiSpeciesMutationPipeline:
         self.download_index_and_fragment()
         self.align_species_to_outgroup()
         self.generate_pileup()
-        self._extract_mutations()
+        self._extract_mutations() # writes matching_bases.csv.gz; IF an input tree is given it will write spectra too.
+        
+        # Validate PHYLIP is available before phylogenetic reconstruction
+        if not check_phylip_available('dnapars'):
+            raise RuntimeError(
+                "PHYLIP is required for multi-species phylogenetic reconstruction but was not found.\n"
+                "Please install PHYLIP via conda: `conda install -c bioconda phylip`"
+            )
+        
         self._reconstruct_phylogeny()
+
+        """
+        Branch labels come from PHYLIP's .outfile interior numbering (clade-matched
+        by tree_from_phylip_outtree) for BOTH paths -> labels are consistent and
+        match the .outfile. Tree given -> the user topology PHYLIP just scored;
+        no tree -> the topology PHYLIP inferred. matching_bases.csv.gz + triplets.json
+        are cached from the first pass, so this only runs the Fitch + spectra half."""
+        if self.newick_tree:
+            phylip_outtree = os.path.join(self.output_dir, "multi_species_phylip_with_tree", "given_tree_run.outtree")
+        else:
+            phylip_outtree = os.path.join(self.output_dir, "multi_species_phylip_no_tree", "multi_species_phylip.outtree")
+        self.tree = tree_from_phylip_outtree(phylip_outtree, self.terminal_mapping, self.outgroup_name)
+        self._extract_mutations()   # cached CSV -> Fitch -> mutation_spectras.tsv + Tables + Plots + CSVs
+
+        """# No input tree -> use the tree PHYLIP just inferred to produce spectra.
+        # matching_bases.csv.gz is cached, so this only runs the Fitch + spectra half.
+        if self.tree is None:
+             inferred = os.path.join(self.output_dir, "multi_species_phylip_no_tree", "multi_species_phylip.outtree")
+             self.tree = tree_from_phylip_outtree(inferred, self.terminal_mapping, self.outgroup_name)
+             self._extract_mutations()      # cached CSV -> Fitch -> mutation_spectras.tsv + Plots + CSVs"""
+
         log("Pipeline completed successfully.", self.verbose)
 
     def parse_and_annotate_tree(self):
         accession_lookup, default_outgroup = parse_species_accession_from_newick(self.newick_tree)
         if not self.outgroup_name:
             self.outgroup_name = default_outgroup
-        self.tree, self.terminal_mapping, self.species_list = annotate_tree_with_indices(self.newick_tree, self.outgroup_name, verbose=self.verbose)
+        # Annotate only for the mapping + the intree PHYLIP needs. Do NOT keep this
+        # tree for Fitch: branch labels come from PHYLIP's .outfile below, so
+        # self.tree stays None and the first _extract_mutations() writes CSV only.
+        annotated_tree, self.terminal_mapping, self.species_list = annotate_tree_with_indices(self.newick_tree, self.outgroup_name, verbose=self.verbose)
 
         # Rebuild species_dict in the same order as species_list (outgroup first),
         # so self.genomes and self.alignments follow the same ordering.
         self.species_dict = {name: accession_lookup[name] for name in self.species_list}
 
         tree_path = os.path.join(self.output_dir, "annotated_tree.nwk")
-        save_annotated_tree(self.tree, tree_path)
+        save_annotated_tree(annotated_tree, tree_path)
         with open(os.path.join(self.output_dir, "species_mapping.json"), 'w') as f:
             json.dump(self.terminal_mapping, f, indent=2)
         #with open(os.path.join(self.output_dir, "species_mapping2.json"), 'w') as f:
@@ -615,6 +558,11 @@ class MultiSpeciesMutationPipeline:
             json.dump(self.species_dict, f, indent=2)
 
     def align_species_to_outgroup(self):
+        ingroup = [(species, genome) for species, genome in self.genomes.items()
+                   if species != self.outgroup_name]
+        if self._stage_parallel(self.align_jobs) and len(ingroup) > 1:
+            return self._align_species_parallel(ingroup)
+
         for species, genome in self.genomes.items():
             if species == self.outgroup_name:
                 continue
@@ -645,6 +593,45 @@ class MultiSpeciesMutationPipeline:
 
             self.alignments.append(aligner)
 
+    def _align_species_parallel(self, ingroup):
+        """Align the ingroup species concurrently, splitting the thread budget.
+
+        ``bwa`` is itself threaded, but the per-read Python SAM filter
+        (``with_continuity_filter_sam``) is single-threaded and throttles the
+        pipe, so several species with fewer threads each beat one at a time.
+        """
+        n_workers, threads = parallel_alignment.plan_jobs(
+            len(ingroup), self.cores, self.align_jobs, self.max_memory_mb)
+
+        # Same construction as the serial stage, with the thread budget split.
+        aligners = [
+            Aligner(
+                species_genome=genome,
+                reference_genome=self.reference,
+                base_output_dir=self.output_dir,
+                aligner_cmd=self.aligner_cmd,
+                aligner_name=self.aligner_name,
+                cores=threads,
+                verbose=self.verbose,
+            )
+            for _, genome in ingroup
+        ]
+
+        streamed = self.params.get("streamed", False)
+        align_kwargs = {
+            "mapq": self.params.get("mapq", 60),
+            "low_mapq": self.params.get("low_mapq", 1),
+            "continuity": self.params.get("continuity", True),
+        }
+        if streamed:
+            align_kwargs["max_sort_mem"] = self.params.get("max_samtools_mem", None)
+
+        # `self.genomes` follows `species_list` order, so `aligners` does too, and
+        # run_alignments returns that same order -- which is what fixes the BAM
+        # column order (taxaK) for everything downstream.
+        self.alignments = parallel_alignment.run_alignments(
+            aligners, streamed, align_kwargs, n_workers, verbose=self.verbose)
+
     def generate_pileup(self):
         pileup = Pileup(
             outgroup=self.reference,
@@ -654,10 +641,36 @@ class MultiSpeciesMutationPipeline:
             no_cache=self.no_cache,
             verbose=self.verbose
         )
-        self.pileup_path = pileup.generate()
+        # Gated on the SCAN stage, not on `self.parallel`: the serial scan reads
+        # this file, so `--scan-jobs 1` must bring the whole-genome pileup back
+        # even when the other stages stay parallel. Skipping it here while the
+        # extractor takes its serial path would leave the scan with no input.
+        if not self._stage_parallel(self.scan_jobs):
+            self.pileup_path = pileup.generate()
+            return
+
+        # The parallel scan pileups each chromosome itself, straight from the
+        # indexed BAMs, so the whole-genome pileup is never read. The Pileup
+        # object is still built: it validates the inputs and owns the canonical
+        # path.
+        for path in [pileup.ref_fasta] + [a.final_bam for a in self.alignments]:
+            pileup._check_file(path)
+        self.pileup_path = pileup.pileup_path
+        log("Parallel extraction enabled: skipping whole-genome pileup "
+            "(per-chromosome pileups are generated during extraction).", self.verbose)
 
 
     def _extract_mutations(self):
+        # The parallel arguments are passed only when the corresponding stage is
+        # enabled; with none of them the extractor is exactly the serial one.
+        parallel_scan_kwargs = {}
+        if self._stage_parallel(self.scan_jobs):
+            parallel_scan_kwargs = dict(
+                ref_fasta=self.reference.fasta_path,
+                bams=[a.final_bam for a in self.alignments],
+                fai_path=self.reference.fasta_path + ".fai",
+            )
+
         extractor = MultipleSpeciesMutationExtractor(
         pileup_file=self.pileup_path,
         output_dir=self.output_dir,
@@ -666,7 +679,13 @@ class MultiSpeciesMutationPipeline:
         species_list=self.species_list,
         mapping=self.terminal_mapping,
         no_cache=False,
-        verbose=True
+        verbose=True,
+        cores=self.cores,
+        scan_jobs=self.scan_jobs,
+        fitch_jobs=self.fitch_jobs,
+        max_memory_mb=self.max_memory_mb,
+        parallel_fitch=self._stage_parallel(self.fitch_jobs),
+        **parallel_scan_kwargs
         )
         extractor.extract()
 
@@ -694,7 +713,7 @@ if __name__ == "__main__":
     pipeline = MutationExtractionPipeline(
         species_list=species,
         outgroup=outgroup,
-        aligner_name="bwa-mem2",
+        aligner="bwa",
         base_output_dir="../Output_OO",
         mapq=60, 
         suffix= 'MAPQ60',

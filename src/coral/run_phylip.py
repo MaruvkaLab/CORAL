@@ -3,6 +3,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import pandas as pd
+from ete3 import Tree
 from .multiple_species_utils import annotate_tree_with_indices, load_random_rows
 from .utils import log
 
@@ -138,7 +139,6 @@ def run_phylip_command(df, output_dir, exe_path, tree=None, prefix="run1", phyli
 
 
 def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, mapping, verbose=True):
-    from ete3 import Tree
     df = load_random_rows(df_path, verbose=verbose).astype(str)
     # df = pd.read_csv(df_path, index_col=0).astype(str)
     tree = Tree(tree_path, format=1) if tree_path else None

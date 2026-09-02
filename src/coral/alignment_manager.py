@@ -90,12 +90,6 @@ def filter_sam(
 
     write_summary()
     plot_histogram()
-    return {
-        "total_reads": total_reads,
-        "kept_reads": kept_reads,
-        "filtered_low_mapq": filtered_mapq,
-        "mapq_histogram": {str(q): n for q, n in sorted(mapq_values.items())},
-    }
 
 
 def overlaps(read, other_reads):
@@ -118,8 +112,6 @@ def with_continuity_filter_sam(
 ):
     total_reads = 0
     kept_reads = 0
-    kept_high_mapq = 0
-    kept_rescued = 0
     filtered_poor_mapping = 0
     filtered_mapq = 0
     filtered_disjoint = 0
@@ -131,8 +123,6 @@ def with_continuity_filter_sam(
             "Filter Summary:",
             f"  Total reads processed:   {total_reads}",
             f"  Reads kept:              {kept_reads}",
-            f"  Kept (MAPQ >= threshold): {kept_high_mapq}",
-            f"  Kept (continuity rescue): {kept_rescued}",
             f"  Filtered (poor mapping):     {filtered_poor_mapping}",
             f"  Filtered (low MAPQ):     {filtered_mapq}",
             f"  Filtered (disjoint):     {filtered_disjoint}",
@@ -168,66 +158,56 @@ def with_continuity_filter_sam(
     skip_contigs = {'Un', 'random', 'alt', 'fix', 'hap'}
 
     bamfile = pysam.AlignmentFile(input_stream, "rb")
-    try:
-        output_sam = pysam.AlignmentFile(output_stream, "wh", template=bamfile)
-    except Exception:
-        bamfile.close()
-        raise
+    output_sam = pysam.AlignmentFile(output_stream, "wh", template=bamfile)
 
-    def emit(reads, before, after):
-        nonlocal kept_reads, kept_high_mapq, kept_rescued, filtered_disjoint, filtered_chrom
-        for read in reads:
-            mapq_values[read.mapping_quality] += 1
-            chrom = read.reference_name
-            if any(keyword in chrom for keyword in skip_contigs):
-                filtered_chrom += 1
-                continue
-            if read.mapping_quality >= mapq_threshold:
-                output_sam.write(read)
-                kept_reads += 1
-                kept_high_mapq += 1
-            elif overlaps(read, before) or overlaps(read, after):
-                output_sam.write(read)
-                kept_reads += 1
-                kept_rescued += 1
-            else:
-                filtered_disjoint += 1
+    for read in bamfile.fetch():
+        total_reads += 1
+        if read.is_unmapped or read.is_secondary or read.is_supplementary:
+            filtered_poor_mapping += 1
+            continue
+        if read.mapping_quality < low_mapq:
+            filtered_mapq += 1
+            continue
+        if next_read_name == read.query_name:
+            next_reads.append(read)
+        else:
+            for cur_read in cur_reads:
+                mapq_values[cur_read.mapping_quality] += 1
+                chrom = cur_read.reference_name
+                if any(keyword in chrom for keyword in skip_contigs):
+                    filtered_chrom += 1
+                    continue
+                if cur_read.mapping_quality >= mapq_threshold or \
+                   overlaps(cur_read, prev_reads) or overlaps(cur_read, next_reads):
+                    output_sam.write(cur_read)
+                    kept_reads += 1
+                else:
+                    filtered_disjoint += 1
 
-    try:
-        for read in bamfile.fetch():
-            total_reads += 1
-            if read.is_unmapped or read.is_secondary or read.is_supplementary:
-                filtered_poor_mapping += 1
-                continue
-            if read.mapping_quality < low_mapq:
-                filtered_mapq += 1
-                continue
-            if next_read_name == read.query_name:
-                next_reads.append(read)
-            else:
-                emit(cur_reads, prev_reads, next_reads)
-                prev_reads, cur_reads, next_reads = cur_reads, next_reads, [read]
-                next_read_name = read.query_name
+            prev_reads, cur_reads, next_reads = cur_reads, next_reads, [read]
+            next_read_name = read.query_name
 
-        emit(cur_reads, prev_reads, next_reads)
-        emit(next_reads, cur_reads, [])
-    finally:
-        bamfile.close()
-        output_sam.close()
+    # Final group processing
+    for cur_read in next_reads:
+        total_reads += 1
+        mapq_values[cur_read.mapping_quality] += 1
+        chrom = cur_read.reference_name
+        if any(keyword in chrom for keyword in skip_contigs):
+            filtered_chrom += 1
+            continue
+        if cur_read.mapping_quality < low_mapq:
+            filtered_mapq += 1
+            continue
+        if cur_read.mapping_quality >= mapq_threshold or overlaps(cur_read, cur_reads):
+            output_sam.write(cur_read)
+            kept_reads += 1
+        else:
+            filtered_disjoint += 1
 
+    bamfile.close()
+    output_sam.close()
     write_summary()
     plot_histogram()
-    return {
-        "total_reads": total_reads,
-        "kept_reads": kept_reads,
-        "kept_high_mapq": kept_high_mapq,
-        "kept_rescued": kept_rescued,
-        "filtered_poor_mapping": filtered_poor_mapping,
-        "filtered_low_mapq": filtered_mapq,
-        "filtered_disjoint": filtered_disjoint,
-        "filtered_alt_contig": filtered_chrom,
-        "mapq_histogram": {str(q): n for q, n in sorted(mapq_values.items())},
-    }
 
 
 
@@ -259,7 +239,6 @@ class Aligner:
         self.final_bam = f"{self.bam_dir}/{self.species}_to_{self.reference}.bam"
         self.hist_name = f"{self.species}_to_{self.reference}.png"
         self.log_path = self.final_bam.replace(".bam", ".log")
-        self.filter_stats = None  # populated when this run actually filters (not when cached)
 
         os.makedirs(self.bam_dir, exist_ok=True)
         os.makedirs(self.plots_dir, exist_ok=True)
@@ -269,8 +248,8 @@ class Aligner:
         elif aligner_name:
             self.aligner_cmd_template = self.get_aligner_cmd_from_name(aligner_name)
         else:
-            log("No aligner specified. Defaulting to 'bwa-mem2'", self.verbose)
-            self.aligner_cmd_template = self.get_aligner_cmd_from_name("bwa-mem2")
+            log("No aligner specified. Defaulting to 'bwa'", self.verbose)
+            self.aligner_cmd_template = self.get_aligner_cmd_from_name("bwa")
 
         self.validate_aligner_cmd()
 
@@ -316,7 +295,7 @@ class Aligner:
 
         with TextIOWrapper(align_proc.stdout) as reader, TextIOWrapper(sort_proc.stdin, write_through=True, buffering=1) as writer:
             if continuity:
-                self.filter_stats = with_continuity_filter_sam(
+                with_continuity_filter_sam(
                 input_stream=reader,
                 output_stream=writer,
                 low_mapq=low_mapq,
@@ -327,7 +306,7 @@ class Aligner:
                 log_path=self.log_path
                 )
             else:
-                self.filter_stats = filter_sam(
+                filter_sam(
                     input_stream=reader,
                     output_stream=writer,
                     mapq_threshold=mapq,
@@ -369,7 +348,7 @@ class Aligner:
             assert view_proc.stdout and sort_proc.stdin
 
             if continuity:
-                self.filter_stats = with_continuity_filter_sam(
+                with_continuity_filter_sam(
                     input_stream=TextIOWrapper(view_proc.stdout),
                     output_stream=TextIOWrapper(sort_proc.stdin),
                     mapq_threshold=mapq,
@@ -380,7 +359,7 @@ class Aligner:
                     log_path=self.log_path
                 )
             else:
-                self.filter_stats = filter_sam(
+                filter_sam(
                     input_stream=TextIOWrapper(view_proc.stdout),
                     output_stream=TextIOWrapper(sort_proc.stdin),
                     mapq_threshold=mapq,
