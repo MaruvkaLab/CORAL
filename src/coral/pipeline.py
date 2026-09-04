@@ -492,6 +492,7 @@ from .multiple_species_utils import (
     annotate_tree_with_indices,
     save_annotated_tree,
 )
+from . import parallel
 from .run_phylip import run_phylip, check_phylip_available
 
 
@@ -507,6 +508,12 @@ class MultiSpeciesMutationPipeline:
         aligner_cmd=None,
         no_cache=False,
         verbose=True,
+        cores=None,
+        no_parallel=False,
+        align_jobs=None,
+        scan_jobs=None,
+        fitch_jobs=None,
+        max_memory_mb=None,
         **kwargs,
     ):
         if newick_tree is None and species_list is None:
@@ -520,6 +527,16 @@ class MultiSpeciesMutationPipeline:
         self.aligner_cmd=aligner_cmd
         self.no_cache = no_cache
         self.verbose = verbose
+
+        self.requested_cores = cores
+        self.cores = parallel.resolve_cores(cores)
+        self.no_parallel = no_parallel
+        self.align_jobs = align_jobs
+        self.scan_jobs = scan_jobs
+        self.fitch_jobs = fitch_jobs
+        self.max_memory_mb = max_memory_mb
+
+        kwargs["cores"] = self.cores
         self.params = kwargs
 
         self.outgroup_name = outgroup
@@ -533,10 +550,18 @@ class MultiSpeciesMutationPipeline:
 
         os.makedirs(self.output_dir, exist_ok=True)
 
+    @property
+    def parallel(self):
+        """True when this run should use the parallel stages at all."""
+        return (not self.no_parallel) and self.cores > 1
+
+    def _stage_parallel(self, jobs):
+        """True when one stage should be parallel (``jobs=1`` switches it off)."""
+        return self.parallel and (jobs is None or jobs > 1)
+
     def run(self):
         log("Starting multi-species mutation extraction pipeline...", self.verbose)
-        # Checked up front: the alignment and extraction below take hours, and the
-        # run is useless without PHYLIP for the final reconstruction.
+        # Checked up front to avoid long runs that eventually fail without PHYLIP.
         if not check_phylip_available('dnapars'):
             raise RuntimeError(
                 "PHYLIP is required for multi-species phylogenetic reconstruction but was not found.\n"
@@ -615,6 +640,11 @@ class MultiSpeciesMutationPipeline:
             json.dump(self.species_dict, f, indent=2)
 
     def align_species_to_outgroup(self):
+        ingroup = [(species, genome) for species, genome in self.genomes.items()
+                   if species != self.outgroup_name]
+        if self._stage_parallel(self.align_jobs) and len(ingroup) > 1:
+            return self._align_species_parallel(ingroup)
+
         for species, genome in self.genomes.items():
             if species == self.outgroup_name:
                 continue
@@ -645,6 +675,38 @@ class MultiSpeciesMutationPipeline:
 
             self.alignments.append(aligner)
 
+    def _align_species_parallel(self, ingroup):
+        """Align ingroup species concurrently, splitting the CPU budget across species."""
+        n_workers, thread_counts = parallel.plan_align_jobs(
+            len(ingroup), self.cores, self.align_jobs, self.max_memory_mb)
+
+        # Same construction as the serial stage, with the thread budget split.
+        aligners = [
+            Aligner(
+                species_genome=genome,
+                reference_genome=self.reference,
+                base_output_dir=self.output_dir,
+                aligner_cmd=self.aligner_cmd,
+                aligner_name=self.aligner_name,
+                cores=n_threads,
+                verbose=self.verbose,
+            )
+            for (_, genome), n_threads in zip(ingroup, thread_counts)
+        ]
+
+        streamed = self.params.get("streamed", False)
+        align_kwargs = {
+            "mapq": self.params.get("mapq", 60),
+            "low_mapq": self.params.get("low_mapq", 1),
+            "continuity": self.params.get("continuity", True),
+        }
+        if streamed:
+            align_kwargs["max_sort_mem"] = self.params.get("max_samtools_mem", None)
+
+        # `self.genomes` follows `species_list` order, so `aligners` does too
+        self.alignments = parallel.run_alignments(
+            aligners, streamed, align_kwargs, n_workers, verbose=self.verbose)
+
     def generate_pileup(self):
         pileup = Pileup(
             outgroup=self.reference,
@@ -654,10 +716,30 @@ class MultiSpeciesMutationPipeline:
             no_cache=self.no_cache,
             verbose=self.verbose
         )
-        self.pileup_path = pileup.generate()
+
+        if not self._stage_parallel(self.scan_jobs):
+            self.pileup_path = pileup.generate()
+            return
+
+        # The parallel scan pileups each chromosome itself, straight from the
+        # indexed BAMs, so the whole-genome pileup is never read. 
+        for path in [pileup.ref_fasta] + [a.final_bam for a in self.alignments]:
+            pileup._check_file(path)
+        self.pileup_path = pileup.pileup_path
+        log("Parallel extraction enabled: skipping whole-genome pileup "
+            "(per-chromosome pileups are generated during extraction).", self.verbose)
 
 
     def _extract_mutations(self):
+        # The reference and BAMs are passed only when the scan is parallel.
+        parallel_scan_kwargs = {}
+        if self._stage_parallel(self.scan_jobs):
+            parallel_scan_kwargs = dict(
+                ref_fasta=self.reference.fasta_path,
+                bams=[a.final_bam for a in self.alignments],
+                fai_path=self.reference.fasta_path + ".fai",
+            )
+
         extractor = MultipleSpeciesMutationExtractor(
         pileup_file=self.pileup_path,
         output_dir=self.output_dir,
@@ -666,7 +748,13 @@ class MultiSpeciesMutationPipeline:
         species_list=self.species_list,
         mapping=self.terminal_mapping,
         no_cache=False,
-        verbose=True
+        verbose=True,
+        cores=self.cores,
+        scan_jobs=self.scan_jobs,
+        max_memory_mb=self.max_memory_mb,
+        fitch_jobs=self.fitch_jobs,
+        parallel_fitch=self._stage_parallel(self.fitch_jobs),
+        **parallel_scan_kwargs
         )
         extractor.extract()
 

@@ -1,4 +1,5 @@
 import csv
+import json
 import os
 import gzip
 from collections import defaultdict
@@ -18,11 +19,11 @@ _CLEAN_RE = re.compile(r'\^.|\$|[+-](\d*)')
 def clean_bases(s):
     """Strip read-start/end markers and indel notation from an mpileup bases field.
 
-    Fast path: every marker this removes (^x, $, +N…, -N…) contains one of the
-    four characters ^ $ + - . When none are present — the overwhelmingly common
-    case for CORAL's shallow pileups — the regex below matches nothing and would
-    return s unchanged, so we skip it entirely. Byte-for-byte identical to the
-    regex path but avoids the regex-engine call and list building.
+    Fast path: every removable marker (^x, $, +N…, -N…) contains at least one of
+    ^, $, +, or -. When none are present—the overwhelmingly common case for
+    CORAL's shallow pileups—the regex would return s unchanged, so we skip it.
+    This is byte-for-byte identical to the regex path while avoiding the regex
+    call and list construction.
     """
     if '^' not in s and '$' not in s and '+' not in s and '-' not in s:
         return s
@@ -42,13 +43,12 @@ def clean_bases(s):
 
 
 class ParsedLine(list):
-    """A parsed pileup row: [chrom, pos, ref, (depth, bases), (depth, bases), ...].
-    Subclasses list (not composes over it) so fields[0]/fields[3:]/etc. stay
-    native C-level list indexing — no per-access Python method-call overhead.
-    Adds one thing: clean_sample(i) caches clean_bases() per sample so QC and
-    mutation detection never clean the same bases string twice. A line can
-    appear in up to three sliding-window triplets, so without caching it
-    could get re-cleaned 3-4x over."""
+    """Parsed pileup row: [chrom, pos, ref, (depth, bases), ...].
+
+    Subclasses list to preserve native list-indexing performance.
+    clean_sample(i) caches cleaned bases per sample, avoiding repeated
+    clean_bases() calls when a row is reused across sliding windows.
+    """
     __slots__ = ('_clean',)
 
     def __init__(self, chrom, pos, ref_base, samples):
@@ -65,7 +65,9 @@ class ParsedLine(list):
 
 
 class MultipleSpeciesMutationExtractor:
-    def __init__(self, pileup_file, output_dir, n_species, tree=None, species_list=None, mapping=None, no_cache=False, verbose=False):
+    def __init__(self, pileup_file, output_dir, n_species, tree=None, species_list=None, mapping=None, no_cache=False, verbose=False,
+                 ref_fasta=None, bams=None, fai_path=None, cores=1, scan_jobs=None, max_memory_mb=None,
+                 fitch_jobs=None, parallel_fitch=False):
         self.pileup_file = pileup_file
         self.output_dir = output_dir
         self.n_species = n_species
@@ -74,6 +76,16 @@ class MultipleSpeciesMutationExtractor:
         self.mapping = mapping
         self.no_cache = no_cache
         self.verbose = verbose
+
+        # Optional; omitting these reproduces the serial behaviour exactly.
+        self.ref_fasta = ref_fasta
+        self.bams = list(bams) if bams else None
+        self.fai_path = fai_path
+        self.cores = cores or 1
+        self.scan_jobs = scan_jobs
+        self.max_memory_mb = max_memory_mb
+        self.fitch_jobs = fitch_jobs
+        self.parallel_fitch = parallel_fitch
         if self.tree is None and self.species_list is None:
             raise ValueError("Either newick_tree or species_list must be provided.")
         if self.mapping is None:
@@ -82,6 +94,7 @@ class MultipleSpeciesMutationExtractor:
         os.makedirs(self.output_dir, exist_ok=True)
         self.plots_dir = os.path.join(self.output_dir, "Plots")
         self.csv_dir = os.path.join(self.output_dir, "CSVs")
+        self.triplet_counts = None  # trinucleotide opportunities, from the scan
 
     def _all_same(self, seq):
         # count() runs its comparison loop in C; a generator + all() pays
@@ -112,39 +125,19 @@ class MultipleSpeciesMutationExtractor:
             if not self._all_same(cleaned):
                 return False
         return True
-    
-    """
-    def _detect_mutations(self, buffer):
+
+    def _detect_site(self, buffer):
+        """One look at the 3-line window -> (mutation_row, triplet_context).
+
+        Flanks must match their own ref base. The centre is then one of:
+        ingroup varies -> row + counted context; all at ref -> counted context
+        only; no sample at ref -> neither, as a single outgroup cannot polarise
+        it (same exclusion as the two-taxa detect_mutation_triplet).
+        """
         def normalize(fields, ref_base):
             rb = ref_base.upper()
             out = []
-            for i in range(len(fields[3:])):
-                cleaned = fields.clean_sample(i)
-                c = cleaned[0].upper() if cleaned else ''
-                out.append(rb if (not c or c in {',', '.'}) else c)
-            return out
-
-        ref_base = buffer[1][2]
-        prev_bases = normalize(buffer[0], buffer[0][2])
-        curr_bases = normalize(buffer[1], ref_base)
-        next_bases = normalize(buffer[2], buffer[2][2])
-
-        if self._all_same(prev_bases) and self._all_same(next_bases) and len(set(curr_bases)) > 1:
-            return [
-                buffer[1][0], # chrom
-                buffer[1][1], # pos
-                prev_bases[0].upper(),
-                next_bases[0].upper(),
-                ref_base.upper()
-            ] + [b.upper() for b in curr_bases]
-        return None
-    """
-
-    def _detect_mutations(self, buffer):
-        def normalize(fields, ref_base):
-            rb = ref_base.upper()
-            out = []
-            for i in range(len(fields[3:])):
+            for i in range(len(fields) - 3):
                 cleaned = fields.clean_sample(i)
                 c = cleaned[0].upper() if cleaned else ''
                 out.append(rb if (not c or c in {',', '.'}) else c)
@@ -154,19 +147,36 @@ class MultipleSpeciesMutationExtractor:
             rb = fields[2].upper()
             return all(b == rb for b in normalize(fields, rb))
 
-        ref_base = buffer[1][2]
-        curr_bases = normalize(buffer[1], ref_base)
+        if not (matches_ref(buffer[0]) and matches_ref(buffer[2])):
+            return None, None
 
-        if matches_ref(buffer[0]) and matches_ref(buffer[2]) and len(set(curr_bases)) > 1:
-            return [
-                buffer[1][0],  # chrom
-                buffer[1][1],  # pos
-                buffer[0][2].upper(),  # left context = prev line's ref base
-                buffer[2][2].upper(),  # right context = next line's ref base
-                ref_base.upper()
+        ref_upper = buffer[1][2].upper()
+        curr_bases = normalize(buffer[1], buffer[1][2])   # already uppercased
+        distinct = set(curr_bases)
+
+        if ref_upper not in distinct:
+            return None, None
+        triplet_context = buffer[0][2].upper() + ref_upper + buffer[2][2].upper()
+
+        if len(distinct) > 1:   # variable across the ingroup -> CSV row
+            mutation_row = [
+                buffer[1][0],           # chrom
+                buffer[1][1],           # pos
+                buffer[0][2].upper(),   # left  = prev line's ref base
+                buffer[2][2].upper(),   # right = next line's ref base
+                ref_upper,              # = taxa0, the outgroup (it has no BAM)
             ] + [b.upper() for b in curr_bases]
-        return None
-    
+            return mutation_row, triplet_context
+
+        return None, triplet_context   # fully invariant
+
+    @property
+    def parallel_scan(self):
+        """True when the scan can run per chromosome: it needs the indexed BAMs
+        and the reference, which the serial path does not."""
+        return bool(self.ref_fasta and self.bams and self.fai_path)
+
+
     def _recursive_state_check(self, node, row):
         if node.is_leaf():
             node.add_feature("state", {row[f"taxa{self.mapping[node.name]}"]})
@@ -215,10 +225,50 @@ class MultipleSpeciesMutationExtractor:
         csv_path = os.path.join(self.output_dir, "matching_bases.csv.gz")
         header = ["chromosome", "position", "left", "right"] + [f"taxa{k}" for k in self.mapping if isinstance(k, int)]
 
-        if os.path.exists(csv_path) and not self.no_cache:
+        triplets_path = os.path.join(self.output_dir, "triplets.json")
+
+        # Both scan outputs are required: the scan clears triplets.json before it
+        # starts, so a lone CSV means the scan did not finish.
+        if os.path.exists(csv_path) and os.path.exists(triplets_path) and not self.no_cache:
             log(f'Using cached matching positions from csv at {csv_path}', self.verbose)
+            with open(triplets_path) as tf:
+                self.triplet_counts = json.load(tf)
+        elif self.parallel_scan:
+            from .parallel import scan_pileup_parallel   # keeps mp off the serial path
+            self.triplet_counts = scan_pileup_parallel(self, csv_path, triplets_path, header)
         else:
-            with gzip.open(csv_path, 'wt', newline='') as outfile:
+            self.triplet_counts = self._scan_pileup_serial(csv_path, triplets_path, header)
+
+        if self.tree:
+            if self.parallel_fitch:
+                from .parallel import run_fitch
+                mutation_dict, ambiguous_counter = run_fitch(
+                    csv_path, self.tree, self.mapping,
+                    cores=self.cores,
+                    fitch_jobs=self.fitch_jobs,
+                    max_memory_mb=self.max_memory_mb,
+                    log_fn=(lambda msg: log(msg, self.verbose)),
+                )
+            else:
+                mutation_dict, ambiguous_counter = self._fitch_serial(csv_path)
+            self._save_results(mutation_dict)
+            log(f"Total ambiguous mutations: {ambiguous_counter}", self.verbose)
+
+    def _scan_pileup_serial(self, csv_path, triplets_path, header):
+        """Scan the whole-genome pileup with a 3-line sliding window.
+
+        Writes both scan outputs and returns the triplet counts, matching
+        parallel.scan_pileup_parallel. Written to a temporary name and renamed
+        so failed jobs don't leave truncated files.
+        """
+        triplet_counts = defaultdict(int)
+        tmp_path = csv_path + ".tmp"
+        # One generation with the CSV: clear stale counts so a crash between the
+        # two writes can't pair a fresh CSV with old triplets.
+        if os.path.exists(triplets_path):
+            os.remove(triplets_path)
+        try:
+            with gzip.open(tmp_path, 'wt', newline='') as outfile:
                 writer = csv.writer(outfile)
                 writer.writerow(header)
 
@@ -230,21 +280,37 @@ class MultipleSpeciesMutationExtractor:
                         buffer = [buffer[1], buffer[2], self._parse_line(line)]
                         qc_flags = [qc_flags[1], qc_flags[2], self._quality_check(buffer[2])]
                         if all(qc_flags) and self._consecutive(*buffer):
-                            result = self._detect_mutations(buffer)
-                            if result:
+                            result, triplet = self._detect_site(buffer)
+                            if triplet is not None:
+                                triplet_counts[triplet] += 1
+                            if result is not None:
                                 writer.writerow(result)
+            os.replace(tmp_path, csv_path)
+        except BaseException:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
 
-        if self.tree:
-            mutation_dict = defaultdict(list)
-            ambiguous_counter = 0
+        triplet_counts = dict(triplet_counts)
+        # Renamed like the CSV, so a kill mid-write can't leave truncated JSON.
+        tmp_triplets = triplets_path + ".tmp"
+        with open(tmp_triplets, "w") as tf:
+            json.dump(triplet_counts, tf, indent=2)
+        os.replace(tmp_triplets, triplets_path)
+        log(f"Saved {len(triplet_counts)} triplet contexts to {triplets_path}", self.verbose)
+        return triplet_counts
 
-            for chunk in pd.read_csv(csv_path, chunksize=1000):
-                for _, row in chunk.iterrows():
-                    mutation_dict, ambiguous = self._fitch(self.tree.copy(), row, mutation_dict)
-                    ambiguous_counter += ambiguous
+    def _fitch_serial(self, csv_path):
+        """Fitch reconstruction, one row at a time over the scanned CSV."""
+        mutation_dict = defaultdict(list)
+        ambiguous_counter = 0
 
-            self._save_results(mutation_dict)
-            log(f"Total ambiguous mutations: {ambiguous_counter}", self.verbose)
+        for chunk in pd.read_csv(csv_path, chunksize=1000):
+            for _, row in chunk.iterrows():
+                mutation_dict, ambiguous = self._fitch(self.tree.copy(), row, mutation_dict)
+                ambiguous_counter += ambiguous
+
+        return mutation_dict, ambiguous_counter
 
     def _save_results(self, mutation_dict):
         spectra_plotter = MutationSpectraPlotter()
