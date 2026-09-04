@@ -4,7 +4,8 @@ import os
 import gzip
 from collections import defaultdict
 import pandas as pd
-from .multiple_species_utils import annotate_tree_with_indices, save_annotated_tree, collapse_mutations, filter_mutations_dict
+from .multiple_species_utils import annotate_tree_with_indices, save_annotated_tree
+from .mutation_extractor_manager import MutationNormalizer
 from .plot_utils import MutationSpectraPlotter
 from .utils import log
 import re
@@ -93,7 +94,7 @@ class MultipleSpeciesMutationExtractor:
 
         os.makedirs(self.output_dir, exist_ok=True)
         self.plots_dir = os.path.join(self.output_dir, "Plots")
-        self.csv_dir = os.path.join(self.output_dir, "CSVs")
+        self.csv_dir = os.path.join(self.output_dir, "Mutations")
         self.triplet_counts = None  # trinucleotide opportunities, from the scan
 
     def _all_same(self, seq):
@@ -316,17 +317,38 @@ class MultipleSpeciesMutationExtractor:
         spectra_plotter = MutationSpectraPlotter()
         os.makedirs(self.plots_dir, exist_ok=True)
         os.makedirs(self.csv_dir, exist_ok=True)
-        spectra_dict = {}
+        # run_single's normaliser, so both pipelines fold and scale identically.
+        # It owns Tables/ and creates it.
+        normalizer = MutationNormalizer(self.output_dir, verbose=self.verbose)
+        tables_dir = normalizer.output_dir
+
+        # One shared, branch-agnostic denominator for every branch.
+        collapsed_triplets = normalizer.collapse_triplets(
+            normalizer.filter_triplets_dict(self.triplet_counts or {}))
+
+        spectra_dict = {}       # per-branch collapsed+filtered raw spectrum
+        normalized_scaled = {}  # per-branch spectrum / triplet opportunities, scaled
+        scaled_raw = {}         # per-branch raw spectrum, scaled
 
         for branch_key, mutations in mutation_dict.items():
             df = pd.DataFrame(mutations, columns=["chromosome", "position", "mutation"])
             csv_path = os.path.join(self.csv_dir, f"{branch_key}.csv.gz")
             df.to_csv(csv_path, index=False, header=False, sep="\t", compression="gzip")
-            mutation_spectra = collapse_mutations(dict(df['mutation'].value_counts()))
-            mutation_spectra = filter_mutations_dict(mutation_spectra)
+            mutation_spectra = normalizer.collapse_mutations(dict(df['mutation'].value_counts()))
+            mutation_spectra = normalizer.filter_mutations_dict(mutation_spectra)
             spectra_dict[branch_key] = mutation_spectra
+            normalized_scaled[branch_key] = normalizer.scale_counts(
+                normalizer.normalize_by_triplets(mutation_spectra, collapsed_triplets))
+            scaled_raw[branch_key] = normalizer.scale_counts(mutation_spectra)
             spectra_plot_path = os.path.join(self.plots_dir, f"{branch_key}_spectra.png")
             spectra_plotter.plot_mutations(pd.Series(mutation_spectra), spectra_plot_path, f"Mutation Spectra: {branch_key}")
 
         spectra_df = pd.DataFrame(spectra_dict)
         spectra_df.to_csv(os.path.join(self.output_dir, "mutation_spectras.tsv"), sep="\t")
+
+        spectra_df.to_csv(os.path.join(tables_dir, "collapsed_mutations.tsv"), sep="\t")
+        pd.DataFrame(normalized_scaled).to_csv(os.path.join(tables_dir, "normalized_scaled.tsv"), sep="\t")
+        pd.DataFrame(scaled_raw).to_csv(os.path.join(tables_dir, "scaled_raw.tsv"), sep="\t")
+        # The denominator is one shared vector, so a single column, not per-branch.
+        pd.Series(collapsed_triplets, name="triplets").to_frame().to_csv(
+            os.path.join(tables_dir, "triplets.tsv"), sep="\t")

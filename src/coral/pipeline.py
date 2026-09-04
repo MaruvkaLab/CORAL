@@ -491,6 +491,7 @@ from .multiple_species_utils import (
     parse_species_accession_from_newick,
     annotate_tree_with_indices,
     save_annotated_tree,
+    tree_from_phylip_outtree,
 )
 from . import parallel
 from .run_phylip import run_phylip, check_phylip_available
@@ -540,7 +541,8 @@ class MultiSpeciesMutationPipeline:
         self.params = kwargs
 
         self.outgroup_name = outgroup
-        self.tree = None
+        self.tree = None            # the tree Fitch runs on: PHYLIP's, set in run()
+        self.annotated_tree = None  # the annotated input tree, when one was given
         self.terminal_mapping = None
         self.species_dict = {}
         self.reference = None
@@ -577,20 +579,45 @@ class MultiSpeciesMutationPipeline:
         self.generate_pileup()
         self._extract_mutations()
         self._reconstruct_phylogeny()
+
+        # Fitch runs on PHYLIP's tree so branch labels match its .outfile: the
+        # topology it scored for a given tree (dnapars 'U' mode leaves it
+        # unchanged), or the one it inferred when no tree was given. Without
+        # this the species_list path has no tree at all and writes no spectra.
+        if self.newick_tree:
+            phylip_outtree = os.path.join(self.output_dir, "multi_species_phylip_with_tree", "given_tree_run.outtree")
+        else:
+            phylip_outtree = os.path.join(self.output_dir, "multi_species_phylip_no_tree", "multi_species_phylip.outtree")
+        try:
+            self.tree = tree_from_phylip_outtree(phylip_outtree, self.terminal_mapping, self.outgroup_name)
+        except (OSError, ValueError) as e:
+            if self.annotated_tree is None:
+                raise
+            # A PHYLIP problem shouldn't cost the spectra when we have a tree.
+            log(f"Could not use the PHYLIP tree ({e}); falling back to the annotated input tree.", self.verbose)
+            self.tree = self.annotated_tree
+
+        # matching_bases.csv.gz and triplets.json are cached, so this is the
+        # Fitch + spectra half only, not a second scan.
+        self._extract_mutations()
+
         log("Pipeline completed successfully.", self.verbose)
 
     def parse_and_annotate_tree(self):
         accession_lookup, default_outgroup = parse_species_accession_from_newick(self.newick_tree)
         if not self.outgroup_name:
             self.outgroup_name = default_outgroup
-        self.tree, self.terminal_mapping, self.species_list = annotate_tree_with_indices(self.newick_tree, self.outgroup_name, verbose=self.verbose)
+        # Annotate for the mapping and for the intree PHYLIP needs. self.tree is
+        # left None on purpose, so the first _extract_mutations() only scans;
+        # Fitch runs later on PHYLIP's tree (see run()).
+        self.annotated_tree, self.terminal_mapping, self.species_list = annotate_tree_with_indices(self.newick_tree, self.outgroup_name, verbose=self.verbose)
 
         # Rebuild species_dict in the same order as species_list (outgroup first),
         # so self.genomes and self.alignments follow the same ordering.
         self.species_dict = {name: accession_lookup[name] for name in self.species_list}
 
         tree_path = os.path.join(self.output_dir, "annotated_tree.nwk")
-        save_annotated_tree(self.tree, tree_path)
+        save_annotated_tree(self.annotated_tree, tree_path)
         with open(os.path.join(self.output_dir, "species_mapping.json"), 'w') as f:
             json.dump(self.terminal_mapping, f, indent=2)
         #with open(os.path.join(self.output_dir, "species_mapping2.json"), 'w') as f:
