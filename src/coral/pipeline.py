@@ -491,7 +491,9 @@ from .multiple_species_utils import (
     parse_species_accession_from_newick,
     annotate_tree_with_indices,
     save_annotated_tree,
+    tree_from_phylip_outtree,
 )
+from . import parallel
 from .run_phylip import run_phylip, check_phylip_available
 
 
@@ -507,6 +509,12 @@ class MultiSpeciesMutationPipeline:
         aligner_cmd=None,
         no_cache=False,
         verbose=True,
+        cores=None,
+        no_parallel=False,
+        align_jobs=None,
+        scan_jobs=None,
+        fitch_jobs=None,
+        max_memory_mb=None,
         **kwargs,
     ):
         if newick_tree is None and species_list is None:
@@ -520,10 +528,21 @@ class MultiSpeciesMutationPipeline:
         self.aligner_cmd=aligner_cmd
         self.no_cache = no_cache
         self.verbose = verbose
+
+        self.requested_cores = cores
+        self.cores = parallel.resolve_cores(cores)
+        self.no_parallel = no_parallel
+        self.align_jobs = align_jobs
+        self.scan_jobs = scan_jobs
+        self.fitch_jobs = fitch_jobs
+        self.max_memory_mb = max_memory_mb
+
+        kwargs["cores"] = self.cores
         self.params = kwargs
 
         self.outgroup_name = outgroup
-        self.tree = None
+        self.tree = None            # the tree Fitch runs on: PHYLIP's, set in run()
+        self.annotated_tree = None  # the annotated input tree, when one was given
         self.terminal_mapping = None
         self.species_dict = {}
         self.reference = None
@@ -533,10 +552,18 @@ class MultiSpeciesMutationPipeline:
 
         os.makedirs(self.output_dir, exist_ok=True)
 
+    @property
+    def parallel(self):
+        """True when this run should use the parallel stages at all."""
+        return (not self.no_parallel) and self.cores > 1
+
+    def _stage_parallel(self, jobs):
+        """True when one stage should be parallel (``jobs=1`` switches it off)."""
+        return self.parallel and (jobs is None or jobs > 1)
+
     def run(self):
         log("Starting multi-species mutation extraction pipeline...", self.verbose)
-        # Checked up front: the alignment and extraction below take hours, and the
-        # run is useless without PHYLIP for the final reconstruction.
+        # Checked up front to avoid long runs that eventually fail without PHYLIP.
         if not check_phylip_available('dnapars'):
             raise RuntimeError(
                 "PHYLIP is required for multi-species phylogenetic reconstruction but was not found.\n"
@@ -552,20 +579,45 @@ class MultiSpeciesMutationPipeline:
         self.generate_pileup()
         self._extract_mutations()
         self._reconstruct_phylogeny()
+
+        # Fitch runs on PHYLIP's tree so branch labels match its .outfile: the
+        # topology it scored for a given tree (dnapars 'U' mode leaves it
+        # unchanged), or the one it inferred when no tree was given. Without
+        # this the species_list path has no tree at all and writes no spectra.
+        if self.newick_tree:
+            phylip_outtree = os.path.join(self.output_dir, "multi_species_phylip_with_tree", "given_tree_run.outtree")
+        else:
+            phylip_outtree = os.path.join(self.output_dir, "multi_species_phylip_no_tree", "multi_species_phylip.outtree")
+        try:
+            self.tree = tree_from_phylip_outtree(phylip_outtree, self.terminal_mapping, self.outgroup_name)
+        except (OSError, ValueError) as e:
+            if self.annotated_tree is None:
+                raise
+            # A PHYLIP problem shouldn't cost the spectra when we have a tree.
+            log(f"Could not use the PHYLIP tree ({e}); falling back to the annotated input tree.", self.verbose)
+            self.tree = self.annotated_tree
+
+        # matching_bases.csv.gz and triplets.json are cached, so this is the
+        # Fitch + spectra half only, not a second scan.
+        self._extract_mutations()
+
         log("Pipeline completed successfully.", self.verbose)
 
     def parse_and_annotate_tree(self):
         accession_lookup, default_outgroup = parse_species_accession_from_newick(self.newick_tree)
         if not self.outgroup_name:
             self.outgroup_name = default_outgroup
-        self.tree, self.terminal_mapping, self.species_list = annotate_tree_with_indices(self.newick_tree, self.outgroup_name, verbose=self.verbose)
+        # Annotate for the mapping and for the intree PHYLIP needs. self.tree is
+        # left None on purpose, so the first _extract_mutations() only scans;
+        # Fitch runs later on PHYLIP's tree (see run()).
+        self.annotated_tree, self.terminal_mapping, self.species_list = annotate_tree_with_indices(self.newick_tree, self.outgroup_name, verbose=self.verbose)
 
         # Rebuild species_dict in the same order as species_list (outgroup first),
         # so self.genomes and self.alignments follow the same ordering.
         self.species_dict = {name: accession_lookup[name] for name in self.species_list}
 
         tree_path = os.path.join(self.output_dir, "annotated_tree.nwk")
-        save_annotated_tree(self.tree, tree_path)
+        save_annotated_tree(self.annotated_tree, tree_path)
         with open(os.path.join(self.output_dir, "species_mapping.json"), 'w') as f:
             json.dump(self.terminal_mapping, f, indent=2)
         #with open(os.path.join(self.output_dir, "species_mapping2.json"), 'w') as f:
@@ -615,6 +667,11 @@ class MultiSpeciesMutationPipeline:
             json.dump(self.species_dict, f, indent=2)
 
     def align_species_to_outgroup(self):
+        ingroup = [(species, genome) for species, genome in self.genomes.items()
+                   if species != self.outgroup_name]
+        if self._stage_parallel(self.align_jobs) and len(ingroup) > 1:
+            return self._align_species_parallel(ingroup)
+
         for species, genome in self.genomes.items():
             if species == self.outgroup_name:
                 continue
@@ -645,6 +702,38 @@ class MultiSpeciesMutationPipeline:
 
             self.alignments.append(aligner)
 
+    def _align_species_parallel(self, ingroup):
+        """Align ingroup species concurrently, splitting the CPU budget across species."""
+        n_workers, thread_counts = parallel.plan_align_jobs(
+            len(ingroup), self.cores, self.align_jobs, self.max_memory_mb)
+
+        # Same construction as the serial stage, with the thread budget split.
+        aligners = [
+            Aligner(
+                species_genome=genome,
+                reference_genome=self.reference,
+                base_output_dir=self.output_dir,
+                aligner_cmd=self.aligner_cmd,
+                aligner_name=self.aligner_name,
+                cores=n_threads,
+                verbose=self.verbose,
+            )
+            for (_, genome), n_threads in zip(ingroup, thread_counts)
+        ]
+
+        streamed = self.params.get("streamed", False)
+        align_kwargs = {
+            "mapq": self.params.get("mapq", 60),
+            "low_mapq": self.params.get("low_mapq", 1),
+            "continuity": self.params.get("continuity", True),
+        }
+        if streamed:
+            align_kwargs["max_sort_mem"] = self.params.get("max_samtools_mem", None)
+
+        # `self.genomes` follows `species_list` order, so `aligners` does too
+        self.alignments = parallel.run_alignments(
+            aligners, streamed, align_kwargs, n_workers, verbose=self.verbose)
+
     def generate_pileup(self):
         pileup = Pileup(
             outgroup=self.reference,
@@ -654,10 +743,30 @@ class MultiSpeciesMutationPipeline:
             no_cache=self.no_cache,
             verbose=self.verbose
         )
-        self.pileup_path = pileup.generate()
+
+        if not self._stage_parallel(self.scan_jobs):
+            self.pileup_path = pileup.generate()
+            return
+
+        # The parallel scan pileups each chromosome itself, straight from the
+        # indexed BAMs, so the whole-genome pileup is never read. 
+        for path in [pileup.ref_fasta] + [a.final_bam for a in self.alignments]:
+            pileup._check_file(path)
+        self.pileup_path = pileup.pileup_path
+        log("Parallel extraction enabled: skipping whole-genome pileup "
+            "(per-chromosome pileups are generated during extraction).", self.verbose)
 
 
     def _extract_mutations(self):
+        # The reference and BAMs are passed only when the scan is parallel.
+        parallel_scan_kwargs = {}
+        if self._stage_parallel(self.scan_jobs):
+            parallel_scan_kwargs = dict(
+                ref_fasta=self.reference.fasta_path,
+                bams=[a.final_bam for a in self.alignments],
+                fai_path=self.reference.fasta_path + ".fai",
+            )
+
         extractor = MultipleSpeciesMutationExtractor(
         pileup_file=self.pileup_path,
         output_dir=self.output_dir,
@@ -666,7 +775,13 @@ class MultiSpeciesMutationPipeline:
         species_list=self.species_list,
         mapping=self.terminal_mapping,
         no_cache=False,
-        verbose=True
+        verbose=True,
+        cores=self.cores,
+        scan_jobs=self.scan_jobs,
+        max_memory_mb=self.max_memory_mb,
+        fitch_jobs=self.fitch_jobs,
+        parallel_fitch=self._stage_parallel(self.fitch_jobs),
+        **parallel_scan_kwargs
         )
         extractor.extract()
 

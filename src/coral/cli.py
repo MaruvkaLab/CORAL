@@ -60,7 +60,24 @@ def main():
     multi.add_argument("--run-id", default=None)
     multi.add_argument("--mapq", type=int, default=60)
     multi.add_argument("--low-mapq", type=int, default=1)
-    multi.add_argument("--cores", type=int, default=None)
+    multi.add_argument("--cores", type=int, default=None,
+                       help="Number of cores to use. Default: use all available cores. "
+                       "--cores 1 runs everything serially.")
+
+    # --- parallelism (run_multi is parallel by default; these switch it off) ---
+    multi.add_argument("--no-parallel", action="store_true",
+                       help="Run the mutation extraction serially: whole-genome pileup, "
+                            "serial scan, recursive per-row Fitch.")
+    multi.add_argument("--align-jobs", type=int, default=None,
+                       help="Species aligned concurrently; each gets cores/jobs threads. ")
+    multi.add_argument("--scan-jobs", type=int, default=None,
+                       help="Chromosomes scanned concurrently. 1 uses the whole-genome pileup.")
+    multi.add_argument("--fitch-jobs", type=int, default=None,
+                       help="Workers for the Fitch pass. 1 runs the recursive per-row "
+                            "implementation.")
+    multi.add_argument("--max-memory-mb", type=int, default=None,
+                       help="Memory budget for the whole run. Caps the worker count of "
+                            "each stage.")
 
     # === Run PHYLIP ===
     phylip = subparsers.add_parser("run_phylip", help="Run PHYLIP on mutation matrix")
@@ -118,6 +135,11 @@ def main():
                 low_mapq=args.low_mapq,
                 cores=args.cores,
                 continuity=args.continuity,
+                no_parallel=args.no_parallel,
+                align_jobs=args.align_jobs,
+                scan_jobs=args.scan_jobs,
+                fitch_jobs=args.fitch_jobs,
+                max_memory_mb=args.max_memory_mb,
             )
             pipeline.run()
 
