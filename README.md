@@ -109,7 +109,27 @@ coral run_multi \
   --mapq 60
 ```
 
+`run_multi` runs its alignment, scan and Fitch stages in parallel by default,
+using every core the process was granted. To control this:
+
+```bash
+--cores N          # total core budget (default: all available)
+--no-parallel      # run every stage serially
+--align-jobs N     # species aligned concurrently
+--scan-jobs N      # chromosomes scanned concurrently; 1 uses the whole-genome pileup
+--fitch-jobs N     # workers for the Fitch pass
+--max-memory-mb N  # memory budget; caps the worker count of each stage
+```
+
+Setting a stage to `1`, or passing `--cores 1`, restores that stage's original
+serial path. `--align-jobs`, `--scan-jobs` and `--fitch-jobs` divide the
+`--cores` budget and cannot exceed it.
+
 **Note:** Multi-species mode is experimental and intended for exploratory analyses.
+
+**Note:** Parallel stages use the `spawn` start method, which re-imports
+`__main__`. Driving the pipeline from the `coral` command or from a script is
+fine; calling it from `python -c` or from stdin is not.
 
 ---
 
