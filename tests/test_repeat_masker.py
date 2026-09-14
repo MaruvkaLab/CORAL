@@ -83,3 +83,36 @@ def test_bed_roundtrip(tmp_path):
     assert back.contains("chr1", 100) and back.contains("chr1", 200)
     assert not back.contains("chr1", 201)
     assert back.contains("chr2", 10) and back.contains("chr2", 90)
+
+
+def test_contains_array_matches_contains():
+    m = RepeatMask({"chr1": [(100, 200), (300, 350)]})
+    pos = [1, 99, 100, 150, 200, 201, 299, 300, 350, 351]
+    assert m.contains_array("chr1", pos).tolist() == [m.contains("chr1", p) for p in pos]
+    assert not m.contains_array("chrX", pos).any()
+    assert m.contains_array("chr1", []).shape == (0,)
+
+
+def test_intervals_clips_to_window():
+    m = RepeatMask({"chr1": [(100, 200), (300, 350), (500, 510)]})
+    s, e = m.intervals("chr1", 150, 320)
+    assert list(zip(s.tolist(), e.tolist())) == [(150, 200), (300, 320)]
+    s, e = m.intervals("chr1")
+    assert list(zip(s.tolist(), e.tolist())) == [(100, 200), (300, 350), (500, 510)]
+    assert m.intervals("chrX", 1, 10)[0].size == 0
+
+
+def test_build_mask_records_bed_path(tmp_path, monkeypatch):
+    import coral.repeat_masker as rm
+    fasta = tmp_path / "g.fasta"
+    fasta.write_text(">c1\n" + "A" * 100 + "\n")
+
+    def fake_windowmasker(fasta_path, out_dir, **kwargs):
+        path = tmp_path / "g.fasta.wm_intervals"
+        path.write_text(">c1\n9 - 19\n")
+        return str(path)
+
+    monkeypatch.setattr(rm, "run_windowmasker", fake_windowmasker)
+    mask = rm.build_mask(str(fasta), str(tmp_path), verbose=False)
+    assert mask.bed_path.endswith(".wm_intervals.repeats.bed")
+    assert open(mask.bed_path).read() == "c1\t9\t20\n"

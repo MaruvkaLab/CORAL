@@ -22,6 +22,8 @@ from .pileup_manager import Pileup
 from .plot_utils import CoveragePlotter, MutationDensityPlotter, MutationSpectraPlotter
 from .utils import get_top_n_chromosomes, log
 from .repeat_masker import build_mask
+from .viewer import (DEFAULT_MAX_GENOME_BP, ViewerError, build_viewer as build_viewer_page,
+                     preserve_viewer_inputs as preserve_viewer_files)
 import psutil
 import pysam
 
@@ -101,6 +103,7 @@ class MutationExtractionPipeline:
         self.align_times = {}
         self.genome_stats = {}
         self.reference_mask = None    # RepeatMask on the outgroup, if --repeat-mask
+        self.mask_beds = {}           # genome name -> merged mask BED (read by --viewer)
         self.verbose = verbose
         self.no_cache = no_cache
 
@@ -109,13 +112,15 @@ class MutationExtractionPipeline:
         None. Uses WindowMasker by default (library-free); RepeatMasker if selected."""
         if not self.params.get("repeat_mask", False):
             return None
-        return build_mask(
+        mask = build_mask(
             genome.fasta_path, genome.output_dir,
             tool=self.params.get("repeat_masker", "windowmasker"),
             species=self.params.get("repeat_species"),
             cores=self.params.get("cores", 1) or 1,
             dust=self.params.get("repeat_dust", True),
             no_cache=self.no_cache, verbose=self.verbose)
+        self.mask_beds[genome.name] = getattr(mask, "bed_path", None)
+        return mask
 
     
     def run(self):
@@ -155,7 +160,12 @@ class MutationExtractionPipeline:
         if self.params.get("plots", True):
             timed_stage("Run Plots", self.run_plots)
         self.genome_stats = self._collect_genome_stats()  # before cleanup removes the FASTAs
+        viewer = self.params.get("viewer", False)
+        if viewer:
+            timed_stage("Preserve viewer inputs", self.preserve_viewer_inputs)
         timed_stage("Cleanup files", self.cleanup)
+        if viewer:
+            timed_stage("Build viewer", self.build_viewer)
 
         total_runtime = round(time.time() - start_pipeline, 2)
         timings["Total Runtime"] = total_runtime
@@ -481,6 +491,28 @@ class MutationExtractionPipeline:
                                  output_dir=os.path.join(self.output_dir, 'Plots'),
                                  mutation_category = r"[ACTG][C>T]G")
             
+    def preserve_viewer_inputs(self):
+        """Keep the reference FASTA and the repeat-mask BEDs that cleanup would delete.
+        Never fails the run; a failure only means `coral view` has nothing to read."""
+        try:
+            preserve_viewer_files(self.output_dir, self.reference, self.genomes, self.mask_beds,
+                                  parameters=dict(self.params, aligner_name=self.aligner_name),
+                                  verbose=self.verbose)
+        except Exception as e:
+            log(f"Warning: could not keep viewer inputs: {e}", self.verbose)
+
+    def build_viewer(self):
+        """Write Viewer/<run>.html. Never fails the run: a genome above the size cap, or any
+        other problem, is logged together with how to build the page by hand."""
+        try:
+            build_viewer_page(self.output_dir,
+                              max_genome_bp=self.params.get("viewer_max_genome_bp", DEFAULT_MAX_GENOME_BP),
+                              verbose=self.verbose)
+        except ViewerError as e:
+            log(f"Viewer not built: {e}", self.verbose)
+        except Exception as e:
+            log(f"Warning: could not build the viewer ({e}); retry with `coral view {self.output_dir}`.", self.verbose)
+
     def cleanup(self):
         cleaner = PipelineCleaner(self.genomes + [self.reference], self.alignments, self.pileup, base_dir=self.output_dir, verbose=self.verbose)
         cleaner.run(bams=True, pileup=True, genomes=True)

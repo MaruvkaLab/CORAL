@@ -1,0 +1,869 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CORAL Run Browser</title>
+<meta name="description" content="Repeat mask, reference sequence and CORAL mutation calls along the reference of one run">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  color-scheme: light;
+  --ground: #f4f6f7;
+  --panel: #ffffff;
+  --ink: #16202a;
+  --ink-2: #4b5864;
+  --muted: #6b7783;
+  --rule: #dbe1e6;
+  --grid: #eaeef1;
+  --mask: #8c96a0;
+  --mask-curtain: rgba(140, 150, 160, 0.16);
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --focus: #2a78d6;
+  --chip-on: #16202a;
+  --chip-on-ink: #ffffff;
+  --font-display: "IBM Plex Sans Condensed", "Roboto Condensed", "Arial Narrow", sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ground: #12171c;
+    --panel: #192027;
+    --ink: #e8edf1;
+    --ink-2: #b9c3cc;
+    --muted: #8f9ba6;
+    --rule: #2a333c;
+    --grid: #212930;
+    --mask: #7d8894;
+    --mask-curtain: rgba(125, 136, 148, 0.18);
+    --s1: #3987e5;
+    --s2: #d95926;
+    --focus: #3987e5;
+    --chip-on: #e8edf1;
+    --chip-on-ink: #12171c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #12171c;
+  --panel: #192027;
+  --ink: #e8edf1;
+  --ink-2: #b9c3cc;
+  --muted: #8f9ba6;
+  --rule: #2a333c;
+  --grid: #212930;
+  --mask: #7d8894;
+  --mask-curtain: rgba(125, 136, 148, 0.18);
+  --s1: #3987e5;
+  --s2: #d95926;
+  --focus: #3987e5;
+  --chip-on: #e8edf1;
+  --chip-on-ink: #12171c;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  padding-inline: clamp(16px, 3vw, 36px);
+  padding-block: 24px 48px;
+}
+.wrap { max-width: 1400px; margin-inline: auto; display: grid; gap: 18px; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px 24px; }
+.name { display: grid; gap: 2px; }
+h1 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 26px;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+  margin: 0;
+  text-wrap: balance;
+}
+.lede { margin: 0; color: var(--ink-2); max-width: 72ch; }
+.lede i { font-style: italic; }
+
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.locus { display: flex; }
+.locus input {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  width: min(290px, 70vw);
+  padding: 7px 10px;
+  border: 1px solid var(--rule);
+  border-right: 0;
+  border-radius: 6px 0 0 6px;
+  background: var(--panel);
+  color: var(--ink);
+}
+button {
+  font: 500 13px/1 var(--font-body);
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 8px 11px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--muted); }
+.locus button { border-radius: 0 6px 6px 0; }
+button:focus-visible, input:focus-visible, .viewport:focus-visible, tr:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.btn-group { display: flex; }
+.btn-group button { border-radius: 0; margin-left: -1px; min-width: 34px; }
+.btn-group button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.btn-group button:last-child { border-radius: 0 6px 6px 0; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  padding: 5px 9px;
+  border-radius: 999px;
+}
+.chip[aria-pressed="true"] { background: var(--chip-on); color: var(--chip-on-ink); border-color: var(--chip-on); }
+
+.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; }
+.browser { padding: 14px 16px 12px; display: grid; gap: 10px; }
+
+.facts { display: flex; flex-wrap: wrap; gap: 6px 26px; align-items: baseline; }
+.facts .where { font-family: var(--font-display); font-weight: 600; font-size: 18px; }
+.fact { display: flex; gap: 6px; align-items: baseline; color: var(--ink-2); }
+.fact b { font-family: var(--font-mono); font-weight: 500; color: var(--ink); font-variant-numeric: tabular-nums; }
+.fact .sw { align-self: center; }
+
+.overview { position: relative; height: 34px; cursor: pointer; touch-action: none; }
+.viewport { position: relative; cursor: grab; touch-action: none; outline: none; border-radius: 4px; }
+.viewport.dragging { cursor: grabbing; }
+canvas { display: block; width: 100%; }
+
+.tip {
+  position: fixed;
+  z-index: 10;
+  pointer-events: none;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(10, 20, 30, 0.14);
+  padding: 9px 11px;
+  font-size: 12.5px;
+  min-width: 220px;
+  max-width: 320px;
+}
+.tip .h { font-family: var(--font-mono); font-size: 12px; color: var(--ink-2); margin-bottom: 6px; }
+.tip table { border-collapse: collapse; width: 100%; }
+.tip td { padding: 1px 0; }
+.tip td.n { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; padding-left: 12px; }
+.tip .sub td:first-child { padding-left: 16px; color: var(--ink-2); }
+.tip .sep td { border-top: 1px solid var(--rule); padding-top: 4px; }
+.tip .call { font-family: var(--font-mono); font-size: 12px; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 20px; color: var(--ink-2); font-size: 12.5px; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.sw { width: 14px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+.sw.s1 { background: var(--s1); }
+.sw.s2 { background: var(--s2); }
+.sw.mask { background: var(--mask); }
+.sw.hatch { background: repeating-linear-gradient(135deg, var(--muted) 0 1.5px, transparent 1.5px 4px); box-shadow: inset 0 0 0 1px var(--muted); }
+.sw.hatch-mask { background: repeating-linear-gradient(135deg, var(--mask) 0 1.5px, transparent 1.5px 4px); box-shadow: inset 0 0 0 1px var(--mask); }
+.hint { color: var(--muted); font-size: 12.5px; }
+kbd { font-family: var(--font-mono); font-size: 11.5px; border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--ground); }
+
+.below { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); gap: 18px; align-items: start; }
+@media (max-width: 900px) { .below { grid-template-columns: 1fr; } }
+.section { padding: 14px 16px; display: grid; gap: 10px; }
+h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  margin: 0;
+}
+.spots { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
+.spots h3 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
+.spots p { margin: 0 0 6px; color: var(--muted); font-size: 12.5px; }
+.spots ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+.spots li button {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  border: 0;
+  border-radius: 5px;
+  padding: 5px 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: transparent;
+  text-align: left;
+}
+.spots li button:hover { background: var(--ground); }
+.spots li b { font-weight: 500; font-variant-numeric: tabular-nums; }
+
+.table-scroll { overflow-x: auto; }
+table.genome { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+table.genome th, table.genome td { padding: 5px 8px; text-align: right; white-space: nowrap; }
+table.genome th { font-weight: 600; color: var(--ink-2); border-bottom: 1px solid var(--rule); font-size: 11.5px; letter-spacing: 0.03em; }
+table.genome th:first-child, table.genome td:first-child { text-align: left; }
+table.genome td { font-family: var(--font-mono); font-variant-numeric: tabular-nums; border-bottom: 1px solid var(--grid); }
+table.genome td:first-child { font-family: var(--font-body); }
+table.genome tbody tr { cursor: pointer; }
+table.genome tbody tr:hover, table.genome tbody tr[aria-selected="true"] { background: var(--ground); }
+table.genome tfoot td { font-weight: 600; border-top: 1px solid var(--rule); border-bottom: 0; }
+.th-s1, .th-s2 { display: inline-flex; gap: 6px; align-items: center; }
+
+.notes { color: var(--ink-2); font-size: 13px; }
+.notes ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; max-width: 95ch; }
+.notes code { font-family: var(--font-mono); font-size: 12px; }
+.eyebrow { font-family: var(--font-display); font-weight: 500; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.genome-note { margin: 6px 0 0; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="top">
+    <div class="name">
+      <p class="eyebrow">CORAL run browser</p>
+      <h1 id="title"></h1>
+      <p class="lede" id="lede"></p>
+    </div>
+    <div class="controls">
+      <form class="locus" id="locus-form">
+        <label for="locus" class="sr" hidden>Locus</label>
+        <input id="locus" name="locus" spellcheck="false" autocomplete="off" aria-label="Locus, e.g. contig:1,000-2,000">
+        <button type="submit">Go</button>
+      </form>
+      <div class="btn-group" role="group" aria-label="Zoom">
+        <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
+        <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
+        <button type="button" id="zoom-all">Whole contig</button>
+      </div>
+      <button type="button" id="copy-seq">Copy sequence</button>
+      <span id="copy-status" class="hint" role="status" aria-live="polite"></span>
+    </div>
+  </header>
+
+  <nav class="chips" id="chips" aria-label="Contig"></nav>
+
+  <section class="panel browser" aria-label="Genome browser">
+    <div class="facts" id="facts"></div>
+    <div class="overview" id="overview" title="Click or drag to move the view"><canvas id="ov"></canvas></div>
+    <div class="viewport" id="viewport" tabindex="0" aria-label="Tracks. Drag or use arrow keys to pan; scroll or plus/minus to zoom."><canvas id="tracks"></canvas></div>
+    <div class="legend" id="legend"></div>
+    <div class="hint" id="hint"></div>
+  </section>
+
+  <div class="below">
+    <section class="panel section" aria-labelledby="spots-h">
+      <h2 id="spots-h">Jump to</h2>
+      <div class="spots" id="spots"></div>
+    </section>
+    <section class="panel section" aria-labelledby="genome-h">
+      <h2 id="genome-h">Per contig</h2>
+      <div class="table-scroll"><table class="genome" id="genome"></table></div>
+      <p class="hint genome-note" id="genome-note" hidden></p>
+    </section>
+  </div>
+
+  <section class="notes" aria-label="How this was built">
+    <ul id="notes"></ul>
+  </section>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script id="data" type="application/json">__DATA__</script>
+<script>
+(() => {
+  const RAW = JSON.parse(document.getElementById("data").textContent);
+  const META = RAW.meta, BR = RAW.branches, CTX = RAW.contexts, P = META.parameters || {};
+  const HAS_MASK = !!META.has_mask, HAS_SISTER = !!META.has_sister_masks, HAS_COMPARE = !!META.compare;
+  const esc = s => String(s).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+  const species = n => { const p = String(n).split("_").filter(Boolean); return p.length > 1 ? `${p[0][0]}. ${p.slice(1).join(" ")}` : String(n); };
+  const label = species;
+  const REF = species(META.reference);
+  const MASKER = ({ windowmasker: "WindowMasker", repeatmasker: "RepeatMasker" })[META.masker] || META.masker || "repeat";
+  const fmt = n => Math.round(n).toLocaleString("en-US");
+  const pct = (a, b) => (b ? (100 * a / b).toFixed(1) + "%" : "–");
+
+  // ---- decode ----
+  const unpack = o => {
+    const n = o.d.length, pos = new Int32Array(n), ctx = new Uint8Array(o.c), flag = new Uint8Array(o.f);
+    let p = 0;
+    for (let i = 0; i < n; i++) { p += o.d[i]; pos[i] = p; }
+    let flagged = 0; for (let i = 0; i < n; i++) flagged += flag[i];
+    return { pos, ctx, flag, n, flagged };
+  };
+  const CONTIGS = RAW.contigs.map(c => {
+    const m = c.mask.length / 2, ms = new Int32Array(m), me = new Int32Array(m);
+    let p = 0, bp = 0;
+    for (let i = 0; i < m; i++) { p += c.mask[2 * i]; ms[i] = p; me[i] = p + c.mask[2 * i + 1] - 1; bp += c.mask[2 * i + 1]; }
+    const nr = (c.n || []).length / 2, ns = new Int32Array(nr), ne = new Int32Array(nr);
+    for (let i = 0; i < nr; i++) { ns[i] = c.n[2 * i]; ne[i] = c.n[2 * i] + c.n[2 * i + 1] - 1; }
+    const kept = {}, removed = {};
+    for (const b of BR) { kept[b] = unpack(c.kept[b]); removed[b] = unpack(c.removed[b]); }
+    return { name: c.name, length: c.length, start: c.start, end: c.end, span: c.end - c.start + 1,
+             ms, me, ns, ne, maskedBp: bp, kept, removed, seqB64: c.seq, seqBytes: null };
+  });
+  const REGION_MODE = CONTIGS.some(c => c.start > 1 || c.end < c.length);
+
+  const seqBytes = c => {
+    if (!c.seqBytes) { const bin = atob(c.seqB64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); c.seqBytes = u; }
+    return c.seqBytes;
+  };
+  const baseAt = (c, pos) => {
+    if (pos < c.start || pos > c.end) return "·";
+    const k = lowerBound(c.ne, pos);
+    if (k < c.ns.length && c.ns[k] <= pos) return "N";
+    const i = pos - c.start;
+    return "ACGT"[(seqBytes(c)[i >> 2] >> (6 - 2 * (i & 3))) & 3];
+  };
+  const isMasked = (c, pos) => { const i = lowerBound(c.me, pos); return i < c.ms.length && c.ms[i] <= pos; };
+  const lowerBound = (arr, x) => { let lo = 0, hi = arr.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < x) lo = mid + 1; else hi = mid; } return lo; };
+
+  // ---- theme ----
+  let T = {};
+  const readTheme = () => {
+    const cs = getComputedStyle(document.documentElement);
+    const v = k => cs.getPropertyValue(k).trim();
+    T = { ink: v("--ink"), ink2: v("--ink-2"), muted: v("--muted"), rule: v("--rule"), grid: v("--grid"), panel: v("--panel"),
+          mask: v("--mask"), curtain: v("--mask-curtain"), s: [v("--s1"), v("--s2")], mono: v("--font-mono"), display: v("--font-display") };
+    patterns = {};
+  };
+  let patterns = {};
+  const hatch = (ctx, color) => {
+    if (patterns[color]) return patterns[color];
+    const c = document.createElement("canvas"), s = 5 * DPR;
+    c.width = c.height = s;
+    const g = c.getContext("2d");
+    g.strokeStyle = color; g.lineWidth = 1.4 * DPR;
+    g.beginPath();
+    for (let k = -1; k <= 1; k++) { g.moveTo(k * s, s); g.lineTo(k * s + s, 0); }
+    g.stroke();
+    const pat = ctx.createPattern(c, "repeat");
+    pat.setTransform(new DOMMatrix().scale(1 / DPR));
+    return (patterns[color] = pat);
+  };
+
+  // ---- state ----
+  const S = { ci: 0, start: CONTIGS[0].start, end: CONTIGS[0].end, hoverX: null };
+  const MIN_SPAN = 60;
+  const contig = () => CONTIGS[S.ci];
+  const setView = (start, end) => {
+    const c = contig();
+    const span = Math.max(Math.min(MIN_SPAN, c.span), Math.min(c.span, end - start + 1));
+    start = Math.max(c.start, Math.min(start, c.end - span + 1));
+    S.start = start; S.end = start + span - 1;
+    schedule();
+  };
+
+  // ---- elements ----
+  const $ = id => document.getElementById(id);
+  const tracksCv = $("tracks"), ovCv = $("ov"), viewport = $("viewport"), overview = $("overview"), tip = $("tip");
+  let DPR = Math.max(1, window.devicePixelRatio || 1);
+
+  const TR = { rulerH: 26, seqLabel: 18, seqH: 22, maskLabel: 18, maskH: 34, gap: 16, label: 18, above: 92, below: HAS_COMPARE ? 54 : 4, axisPad: 4 };
+  const LETTER_PX = 5;   // px per base needed before letters are drawn
+  const CALL_LETTER_PX = 7;   // below this, call cells keep their colour but drop the letter
+  const trackTop = [];
+  const layout = () => {
+    let y = TR.rulerH + TR.seqLabel;
+    const seqY = y; y += TR.seqH + TR.gap / 2 + TR.maskLabel;
+    const maskY = y; y += TR.maskH + TR.gap;
+    trackTop.length = 0;
+    for (const b of BR) { y += TR.label; trackTop.push(y); y += TR.above + TR.below + TR.gap; }
+    return { seqY, maskY, height: y - TR.gap + 6 };
+  };
+
+  const sizeCanvas = (cv, h) => {
+    const w = cv.parentElement.clientWidth;
+    cv.style.height = h + "px";
+    cv.width = Math.round(w * DPR); cv.height = Math.round(h * DPR);
+    const ctx = cv.getContext("2d"); ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    return { ctx, w, h };
+  };
+
+  const NICE = []; for (let e = 0; e < 8; e++) for (const m of [1, 2, 5]) NICE.push(m * 10 ** e);
+  const niceAtLeast = x => NICE.find(n => n >= x) || NICE[NICE.length - 1];
+  const bpLabel = (n, step) => {
+    if (step >= 1e6) return (n / 1e6).toFixed(n % 1e6 ? 1 : 0) + " Mb";
+    if (step >= 1e3) return (n / 1e3).toLocaleString("en-US", { maximumFractionDigits: step >= 1e4 ? 0 : 1 }) + " kb";
+    return fmt(n);
+  };
+
+  // ---- binning ----
+  let bins = null;
+  const computeBins = w => {
+    const c = contig(), span = S.end - S.start + 1, bpPerPx = span / w;
+    const bin = niceAtLeast(Math.max(1, bpPerPx * 3));
+    const first = Math.floor((S.start - 1) / bin) * bin + 1;
+    const nb = Math.ceil((S.end - first + 1) / bin);
+    const mk = () => new Float64Array(nb);
+    const out = { bin, first, nb, mask: mk(), kept: BR.map(() => [mk(), mk()]), removed: BR.map(() => [mk(), mk()]) };
+    const last = first + nb * bin - 1;
+    let i = Math.max(0, lowerBound(c.me, first));
+    for (; i < c.ms.length && c.ms[i] <= last; i++) {
+      let s = Math.max(c.ms[i], first), e = Math.min(c.me[i], last);
+      while (s <= e) {
+        const k = Math.floor((s - first) / bin), be = first + (k + 1) * bin - 1, t = Math.max(s, Math.min(e, be));
+        out.mask[k] += t - s + 1; s = t + 1;
+      }
+    }
+    for (let k = 0; k < nb; k++) out.mask[k] /= bin;
+    BR.forEach((b, bi) => {
+      for (const [src, dst] of [[c.kept[b], out.kept[bi]], [c.removed[b], out.removed[bi]]]) {
+        for (let j = lowerBound(src.pos, first); j < src.n && src.pos[j] <= last; j++) {
+          dst[src.flag[j]][Math.floor((src.pos[j] - first) / bin)]++;
+        }
+      }
+    });
+    return out;
+  };
+
+  // ---- draw ----
+  const draw = () => {
+    raf = 0;
+    const { seqY, maskY, height } = layout();
+    const { ctx, w } = sizeCanvas(tracksCv, height);
+    const c = contig(), span = S.end - S.start + 1, pxPerBp = w / span;
+    const X = pos => (pos - S.start) * pxPerBp;             // left edge of base `pos`
+    bins = computeBins(w);
+    const { bin, first, nb } = bins;
+    ctx.clearRect(0, 0, w, height);
+
+    // ruler
+    const step = niceAtLeast(span / Math.max(2, Math.floor(w / 110)));
+    ctx.font = `11px ${T.mono}`; ctx.textBaseline = "top"; ctx.fillStyle = T.muted; ctx.strokeStyle = T.rule; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, TR.rulerH - 0.5); ctx.lineTo(w, TR.rulerH - 0.5); ctx.stroke();
+    for (let t = Math.ceil(S.start / step) * step; t <= S.end; t += step) {
+      const x = Math.round(X(t) + pxPerBp / 2) + 0.5;
+      ctx.beginPath(); ctx.moveTo(x, TR.rulerH - 6); ctx.lineTo(x, TR.rulerH); ctx.stroke();
+      const lab = bpLabel(t, step), tw = ctx.measureText(lab).width;
+      if (x - tw / 2 > 0 && x + tw / 2 < w) ctx.fillText(lab, x - tw / 2, 4);
+    }
+
+    const binX = k => X(first + k * bin), binW = Math.max(1, bin * pxPerBp);
+    const gap = binW >= 5 ? 1 : 0;
+
+    // curtain behind everything below the ruler
+    const bottom = height - 6;
+    ctx.fillStyle = T.curtain;
+    for (let k = 0; k < nb; k++) if (bins.mask[k] > 0) {
+      ctx.globalAlpha = Math.min(1, bins.mask[k]);
+      ctx.fillRect(binX(k), maskY, binW, bottom - maskY);
+    }
+    ctx.globalAlpha = 1;
+
+    // labels
+    const trackLabel = (text, y, sub) => {
+      ctx.font = `600 12.5px ${T.display}`; ctx.fillStyle = T.ink; ctx.textBaseline = "alphabetic";
+      ctx.fillText(text, 0, y - 5);
+      if (sub) { const tw = ctx.measureText(text).width; ctx.font = `12px ${T.display}`; ctx.fillStyle = T.muted; ctx.fillText(sub, tw + 8, y - 5); }
+    };
+    trackLabel(`${REF} mask`, maskY, HAS_MASK ? `${pct(c.maskedBp, c.span)} of ${c.span < c.length ? "region" : "contig"} masked` : "masking was off for this run");
+
+    // reference sequence: letters once there is room; masked bases lowercase on a grey cell
+    const readable = pxPerBp >= LETTER_PX;
+    trackLabel(`${REF} sequence`, seqY, readable ? (HAS_MASK ? `lowercase on grey = masked by ${MASKER}` : "") : `zoom in to ${fmt(Math.floor(w / LETTER_PX))} bp or less to read bases`);
+    ctx.fillStyle = T.grid; ctx.fillRect(0, seqY, w, TR.seqH);
+    if (readable) {
+      const p0 = Math.max(c.start, Math.floor(S.start)), p1 = Math.min(c.end, Math.ceil(S.end));
+      const size = Math.min(15, Math.max(7, pxPerBp * 0.9));
+      ctx.font = `500 ${size}px ${T.mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      let mi = lowerBound(c.me, p0);
+      for (let pos = p0; pos <= p1; pos++) {
+        while (mi < c.ms.length && c.me[mi] < pos) mi++;
+        const masked = mi < c.ms.length && c.ms[mi] <= pos;
+        const x = X(pos);
+        if (masked) { ctx.fillStyle = T.mask; ctx.globalAlpha = 0.34; ctx.fillRect(x, seqY, pxPerBp, TR.seqH); ctx.globalAlpha = 1; }
+        const b = baseAt(c, pos);
+        ctx.fillStyle = masked ? T.ink2 : T.ink;
+        ctx.fillText(masked ? b.toLowerCase() : b, x + pxPerBp / 2, seqY + TR.seqH / 2 + 1);
+      }
+      ctx.textAlign = "start";
+    }
+
+    // mask track: fraction per bin as a bar from the bottom
+    ctx.fillStyle = T.grid; ctx.fillRect(0, maskY, w, TR.maskH);
+    ctx.fillStyle = T.mask;
+    for (let k = 0; k < nb; k++) if (bins.mask[k] > 0) {
+      const h = bins.mask[k] * TR.maskH;
+      ctx.fillRect(binX(k), maskY + TR.maskH - h, Math.max(1, binW - gap), h);
+    }
+
+    // branch tracks, one shared count scale
+    let maxAbove = 1, maxBelow = 1;
+    BR.forEach((b, bi) => {
+      for (let k = 0; k < nb; k++) {
+        maxAbove = Math.max(maxAbove, bins.kept[bi][0][k] + bins.kept[bi][1][k]);
+        maxBelow = Math.max(maxBelow, bins.removed[bi][0][k] + bins.removed[bi][1][k]);
+      }
+    });
+    const unit = Math.min(TR.above / niceAtLeast(maxAbove), TR.below / niceAtLeast(maxBelow));  // px per call, both sides
+    const aboveTop = Math.floor(TR.above / unit), belowTop = Math.floor(TR.below / unit);
+
+    BR.forEach((b, bi) => {
+      const y0 = trackTop[bi], axis = y0 + TR.above;
+      const kept = c.kept[b], rem = c.removed[b];
+      const counts = HAS_COMPARE ? `${fmt(kept.n)} kept · ${fmt(rem.n)} removed` : `${fmt(kept.n)} calls`;
+      trackLabel(`${label(b)} branch`, y0, `${counts} on this ${c.span < c.length ? "region" : "contig"} · ` + (readable ? "letter = base this branch mutated to" : `bins of ${fmt(bin)} bp`));
+      // grid
+      ctx.strokeStyle = T.grid; ctx.lineWidth = 1;
+      for (const yy of HAS_COMPARE ? [y0 + TR.above - aboveTop * unit, axis + belowTop * unit] : [y0 + TR.above - aboveTop * unit]) { ctx.beginPath(); ctx.moveTo(0, Math.round(yy) + 0.5); ctx.lineTo(w, Math.round(yy) + 0.5); ctx.stroke(); }
+      const color = T.s[bi];
+      if (readable) {
+        // base level: one cell per call holding the derived base, kept above the axis, removed below
+        const p0 = Math.max(c.start, Math.floor(S.start)), p1 = Math.min(c.end, Math.ceil(S.end));
+        const cellH = 24, size = Math.min(14, Math.max(7, pxPerBp * 0.85)), withLetter = pxPerBp >= CALL_LETTER_PX;
+        ctx.font = `600 ${size}px ${T.mono}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        for (const [src, below] of [[kept, false], [rem, true]]) {
+          const fill = below ? T.mask : color;
+          for (let j = lowerBound(src.pos, p0); j < src.n && src.pos[j] <= p1; j++) {
+            const x = X(src.pos[j]) + 1, cw = Math.max(2, pxPerBp - 2), y = below ? axis + 2 : axis - cellH - 1;
+            const alt = CTX[src.ctx[j]][4], cx = x + cw / 2, cy = y + cellH / 2 + 1;
+            if (src.flag[j]) {
+              ctx.fillStyle = hatch(ctx, fill); ctx.fillRect(x, y, cw, cellH);
+              ctx.strokeStyle = fill; ctx.lineWidth = 1.5; ctx.strokeRect(x + 0.75, y + 0.75, cw - 1.5, cellH - 1.5);
+              if (withLetter) {
+                const bw = Math.min(cw - 3, size + 2);
+                ctx.fillStyle = T.panel; ctx.fillRect(cx - bw / 2, cy - size / 2 - 1, bw, size + 2);
+              }
+              ctx.fillStyle = T.ink;
+            } else {
+              ctx.fillStyle = fill; ctx.fillRect(x, y, cw, cellH);
+              ctx.fillStyle = T.panel;
+            }
+            if (withLetter) ctx.fillText(alt, cx, cy);
+          }
+        }
+        ctx.textAlign = "start";
+      }
+      for (let k = 0; k < nb && !readable; k++) {
+        const x = binX(k), bw = Math.max(1, binW - gap);
+        const clean = bins.kept[bi][0][k], flag = bins.kept[bi][1][k];
+        if (clean) { ctx.fillStyle = color; ctx.fillRect(x, axis - clean * unit, bw, clean * unit); }
+        if (flag) { const top = axis - (clean + flag) * unit; ctx.fillStyle = hatch(ctx, color); ctx.fillRect(x, top, bw, flag * unit); if (bw >= 3) { ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, top + 0.5, bw - 1, flag * unit - 1); } }
+        const ro = bins.removed[bi][0][k], rs = bins.removed[bi][1][k];
+        if (ro) { ctx.fillStyle = T.mask; ctx.fillRect(x, axis + 1, bw, ro * unit); }
+        if (rs) { ctx.fillStyle = hatch(ctx, T.mask); ctx.fillRect(x, axis + 1 + ro * unit, bw, rs * unit); }
+      }
+      ctx.strokeStyle = T.ink2; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, axis + 0.5); ctx.lineTo(w, axis + 0.5); ctx.stroke();
+      // scale labels
+      ctx.font = `10.5px ${T.mono}`; ctx.fillStyle = T.muted; ctx.textBaseline = "middle";
+      const lab = (txt, yy) => { const tw = ctx.measureText(txt).width; ctx.fillStyle = T.panel; ctx.fillRect(w - tw - 6, yy - 7, tw + 6, 14); ctx.fillStyle = T.muted; ctx.fillText(txt, w - tw - 3, yy); };
+      if (!readable) {
+        lab(`${aboveTop} kept`, y0 + TR.above - aboveTop * unit + 1);
+        if (HAS_COMPARE) lab(`${belowTop} removed`, axis + belowTop * unit - 1);
+      }
+    });
+
+    // hover crosshair
+    if (S.hoverX != null) {
+      const k = Math.floor((S.start - 1 + S.hoverX / pxPerBp - (first - 1)) / bin);
+      if (k >= 0 && k < nb) { ctx.strokeStyle = T.ink2; ctx.globalAlpha = 0.5; ctx.strokeRect(Math.round(binX(k)) + 0.5, maskY - 0.5, Math.max(1, binW) , bottom - maskY); ctx.globalAlpha = 1; }
+    }
+
+    drawOverview();
+    drawFacts();
+    $("locus").value = `${c.name}:${fmt(S.start)}-${fmt(S.end)}`;
+  };
+
+  // overview: mask fraction per ~2px across the whole shown window of the contig, plus the view box
+  const ovCache = new Map();
+  const drawOverview = () => {
+    const { ctx, w, h } = sizeCanvas(ovCv, 34);
+    const c = contig(), key = `${S.ci}:${w}`;
+    if (!ovCache.has(key)) {
+      const nb = Math.max(1, Math.floor(w / 2)), bin = c.span / nb, frac = new Float64Array(nb), calls = new Float64Array(nb);
+      // fractional bin width: split each interval [s, e+1) (offsets from the window start) across bins by real-valued overlap
+      for (let i = 0; i < c.ms.length; i++) {
+        const a = c.ms[i] - c.start, z = c.me[i] - c.start + 1;
+        const k0 = Math.min(nb - 1, Math.floor(a / bin)), k1 = Math.min(nb - 1, Math.floor((z - 1) / bin));
+        for (let k = k0; k <= k1; k++) frac[k] += Math.max(0, Math.min(z, (k + 1) * bin) - Math.max(a, k * bin));
+      }
+      for (const b of BR) { const kp = c.kept[b]; for (let j = 0; j < kp.n; j++) calls[Math.min(nb - 1, Math.floor((kp.pos[j] - c.start) / bin))]++; }
+      let mx = 1; for (let k = 0; k < nb; k++) { frac[k] /= bin; mx = Math.max(mx, calls[k]); }
+      ovCache.set(key, { nb, frac, calls, mx });
+    }
+    const o = ovCache.get(key), bw = w / o.nb;
+    ctx.fillStyle = T.grid; ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = T.mask;
+    for (let k = 0; k < o.nb; k++) { const hh = Math.min(1, o.frac[k] / 0.4) * (h - 4); ctx.fillRect(k * bw, h - hh, Math.max(1, bw - 0.5), hh); }
+    ctx.strokeStyle = T.ink2; ctx.lineWidth = 1.25; ctx.beginPath();
+    for (let k = 0; k < o.nb; k++) { const y = h - 2 - (o.calls[k] / o.mx) * (h - 6); k ? ctx.lineTo(k * bw + bw / 2, y) : ctx.moveTo(bw / 2, y); }
+    ctx.stroke();
+    const x0 = (S.start - c.start) / c.span * w, x1 = (S.end - c.start + 1) / c.span * w;
+    ctx.fillStyle = T.panel; ctx.globalAlpha = 0.55; ctx.fillRect(0, 0, x0, h); ctx.fillRect(x1, 0, w - x1, h); ctx.globalAlpha = 1;
+    ctx.strokeStyle = T.ink; ctx.lineWidth = 1.5; ctx.strokeRect(Math.round(x0) + 0.75, 0.75, Math.max(3, x1 - x0) - 1.5, h - 1.5);
+  };
+
+  const drawFacts = () => {
+    const c = contig(), partial = c.start > 1 || c.end < c.length;
+    const parts = [`<span class="where">${esc(c.name)}</span><span class="fact"><b>${fmt(c.length)}</b> bp${partial ? ` · showing <b>${fmt(c.start)}–${fmt(c.end)}</b>` : ""}</span>`,
+      HAS_MASK ? `<span class="fact"><i class="sw mask"></i>masked <b>${pct(c.maskedBp, c.span)}</b></span>` : `<span class="fact">no repeat mask</span>`];
+    BR.forEach((b, bi) => {
+      const k = c.kept[b], r = c.removed[b];
+      parts.push(`<span class="fact"><i class="sw s${bi + 1}"></i>${esc(label(b))}: <b>${fmt(k.n)}</b> ${HAS_COMPARE ? "kept" : "calls"}` +
+        (HAS_SISTER ? ` (<b>${pct(k.flagged, k.n)}</b> from sister-masked sequence)` : "") +
+        (HAS_COMPARE ? ` · <b>${fmt(r.n)}</b> removed` : "") + `</span>`);
+    });
+    $("facts").innerHTML = parts.join("");
+  };
+
+  let raf = 0;
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(draw); };
+
+  // ---- tooltip ----
+  const showTip = (clientX, clientY, localX) => {
+    if (!bins) return;
+    const c = contig(), w = tracksCv.clientWidth, pxPerBp = w / (S.end - S.start + 1);
+    const pos = S.start + localX / pxPerBp;
+    const k = Math.floor((pos - bins.first) / bins.bin);
+    if (k < 0 || k >= bins.nb) { tip.hidden = true; return; }
+    const bs = Math.max(c.start, bins.first + k * bins.bin), be = Math.min(c.end, bins.first + (k + 1) * bins.bin - 1);
+    let html = `<div class="h">${esc(c.name)}:${fmt(bs)}${be > bs ? "–" + fmt(be) : ""}</div><table>`;
+    if (be === bs) {
+      const tri = [bs - 1, bs, bs + 1].map(q => isMasked(c, q) ? baseAt(c, q).toLowerCase() : baseAt(c, q));
+      html += `<tr><td>reference</td><td class="n">${tri[0]}[${tri[1]}]${tri[2]}</td></tr>`;
+    }
+    if (HAS_MASK) html += `<tr><td>masked in ${esc(REF)}</td><td class="n">${(100 * bins.mask[k]).toFixed(0)}%</td></tr>`;
+    BR.forEach((b, bi) => {
+      const kc = bins.kept[bi][0][k], kf = bins.kept[bi][1][k], ro = bins.removed[bi][0][k], rs = bins.removed[bi][1][k];
+      html += `<tr class="sep"><td><i class="sw s${bi + 1}"></i> ${esc(label(b))} ${HAS_COMPARE ? "kept" : "calls"}</td><td class="n">${fmt(kc + kf)}</td></tr>`;
+      if (kf) html += `<tr class="sub"><td>from sister-masked sequence</td><td class="n">${fmt(kf)}</td></tr>`;
+      if (HAS_COMPARE) {
+        html += `<tr><td>&nbsp;&nbsp;&nbsp;&nbsp;removed by mask</td><td class="n">${fmt(ro + rs)}</td></tr>`;
+        if (rs) html += `<tr class="sub"><td>by the sister mask</td><td class="n">${fmt(rs)}</td></tr>`;
+      }
+    });
+    html += `</table>`;
+    if (bins.bin <= 20) {
+      const rows = [];
+      BR.forEach((b, bi) => {
+        for (const [src, kind] of [[c.kept[b], "kept"], [c.removed[b], "removed"]]) {
+          for (let j = lowerBound(src.pos, bs); j < src.n && src.pos[j] <= be; j++) {
+            const why = kind === "kept" ? (src.flag[j] ? "from sister-masked sequence" : (HAS_COMPARE ? "kept" : "call")) : (src.flag[j] ? "removed · sister mask" : "removed · reference mask");
+            rows.push(`<div class="call"><i class="sw s${bi + 1}"></i> ${fmt(src.pos[j])} ${esc(CTX[src.ctx[j]])} <span style="color:var(--muted)">${esc(label(b))}, ${why}</span></div>`);
+          }
+        }
+      });
+      if (rows.length) html += `<div style="margin-top:6px;border-top:1px solid var(--rule);padding-top:5px">${rows.slice(0, 8).join("")}${rows.length > 8 ? `<div class="call" style="color:var(--muted)">+${rows.length - 8} more</div>` : ""}</div>`;
+    }
+    tip.innerHTML = html; tip.hidden = false;
+    const r = tip.getBoundingClientRect();
+    let tx = clientX + 16, ty = clientY + 16;
+    if (tx + r.width > innerWidth - 8) tx = clientX - r.width - 16;
+    if (ty + r.height > innerHeight - 8) ty = Math.max(8, clientY - r.height - 16);
+    tip.style.left = tx + "px"; tip.style.top = ty + "px";
+  };
+
+  // ---- interaction ----
+  const zoomAt = (factor, frac = 0.5) => {
+    const c = contig(), span = S.end - S.start + 1, ns = Math.max(Math.min(MIN_SPAN, c.span), Math.min(c.span, span * factor));
+    const anchor = S.start + frac * span;
+    setView(anchor - frac * ns, anchor - frac * ns + ns - 1);
+  };
+  viewport.addEventListener("wheel", e => {
+    e.preventDefault();
+    const rect = viewport.getBoundingClientRect(), span = S.end - S.start + 1;
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) setView(S.start + e.deltaX / rect.width * span, S.end + e.deltaX / rect.width * span);
+    else if (e.shiftKey) setView(S.start + e.deltaY / rect.width * span, S.end + e.deltaY / rect.width * span);
+    else zoomAt(Math.exp(e.deltaY * 0.0022), (e.clientX - rect.left) / rect.width);
+  }, { passive: false });
+
+  let drag = null;
+  viewport.addEventListener("pointerdown", e => { drag = { x: e.clientX, start: S.start, end: S.end }; viewport.setPointerCapture(e.pointerId); viewport.classList.add("dragging"); tip.hidden = true; });
+  viewport.addEventListener("pointermove", e => {
+    const rect = viewport.getBoundingClientRect();
+    if (drag) {
+      const d = (e.clientX - drag.x) / rect.width * (drag.end - drag.start + 1);
+      setView(drag.start - d, drag.end - d);
+    } else {
+      S.hoverX = e.clientX - rect.left; schedule(); showTip(e.clientX, e.clientY, S.hoverX);
+    }
+  });
+  const endDrag = e => { drag = null; viewport.classList.remove("dragging"); };
+  viewport.addEventListener("pointerup", endDrag);
+  viewport.addEventListener("pointercancel", endDrag);
+  viewport.addEventListener("pointerleave", () => { S.hoverX = null; tip.hidden = true; schedule(); });
+  viewport.addEventListener("keydown", e => {
+    const span = S.end - S.start + 1;
+    if (e.key === "ArrowLeft") { setView(S.start - span * 0.2, S.end - span * 0.2); e.preventDefault(); }
+    else if (e.key === "ArrowRight") { setView(S.start + span * 0.2, S.end + span * 0.2); e.preventDefault(); }
+    else if (e.key === "+" || e.key === "=") { zoomAt(0.5); e.preventDefault(); }
+    else if (e.key === "-" || e.key === "_") { zoomAt(2); e.preventDefault(); }
+  });
+
+  let ovDrag = false;
+  const ovMove = e => {
+    const rect = overview.getBoundingClientRect(), span = S.end - S.start + 1, c = contig();
+    const center = c.start + (e.clientX - rect.left) / rect.width * c.span;
+    setView(center - span / 2, center + span / 2);
+  };
+  overview.addEventListener("pointerdown", e => { ovDrag = true; overview.setPointerCapture(e.pointerId); ovMove(e); });
+  overview.addEventListener("pointermove", e => { if (ovDrag) ovMove(e); });
+  overview.addEventListener("pointerup", () => { ovDrag = false; });
+
+  $("zoom-in").onclick = () => zoomAt(0.5);
+  $("zoom-out").onclick = () => zoomAt(2);
+  $("zoom-all").onclick = () => setView(contig().start, contig().end);
+
+  const selectContig = (ci, start, end) => {
+    S.ci = ci;
+    document.querySelectorAll("#chips .chip").forEach(b => b.setAttribute("aria-pressed", String(+b.dataset.i === ci)));
+    document.querySelectorAll("#genome tbody tr").forEach(r => r.setAttribute("aria-selected", String(+r.dataset.i === ci)));
+    setView(start ?? CONTIGS[ci].start, end ?? CONTIGS[ci].end);
+  };
+
+  const parseLocus = s => {
+    const m = s.trim().replace(/,/g, "").match(/^([^:\s]+)\s*(?::\s*(\d+)\s*[-–]\s*(\d+))?$/);
+    if (!m) return null;
+    const id = m[1].toLowerCase();
+    const ci = CONTIGS.findIndex(c => c.name.toLowerCase() === id);
+    if (ci < 0) return null;
+    return m[2] ? [ci, +m[2], +m[3]] : [ci];
+  };
+  $("locus-form").addEventListener("submit", e => {
+    e.preventDefault();
+    const p = parseLocus($("locus").value);
+    if (!p) { $("locus").setCustomValidity(`Use a contig and range, e.g. ${CONTIGS[0].name}:1-50,000`); $("locus").reportValidity(); return; }
+    $("locus").setCustomValidity("");
+    selectContig(...p);
+  });
+  $("locus").addEventListener("input", () => $("locus").setCustomValidity(""));
+
+  // copy the visible reference as FASTA, masked bases lowercase
+  const COPY_MAX = 100000;
+  const copyStatus = msg => { $("copy-status").textContent = msg; clearTimeout(copyStatus.t); copyStatus.t = setTimeout(() => ($("copy-status").textContent = ""), 4000); };
+  $("copy-seq").onclick = async () => {
+    const c = contig(), a = Math.max(c.start, Math.round(S.start)), z = Math.min(c.end, Math.round(S.end));
+    if (z - a + 1 > COPY_MAX) { copyStatus(`Zoom in to ${fmt(COPY_MAX)} bp or less to copy`); return; }
+    let seq = "";
+    let mi = lowerBound(c.me, a);
+    for (let pos = a; pos <= z; pos++) {
+      while (mi < c.ms.length && c.me[mi] < pos) mi++;
+      const b = baseAt(c, pos);
+      seq += mi < c.ms.length && c.ms[mi] <= pos ? b.toLowerCase() : b;
+    }
+    const fasta = `>${c.name}:${a}-${z}${HAS_MASK ? ` lowercase=${MASKER}` : ""}\n` + seq.match(/.{1,60}/g).join("\n") + "\n";
+    try { await navigator.clipboard.writeText(fasta); copyStatus(`Copied ${fmt(z - a + 1)} bp as FASTA`); }
+    catch {
+      const ta = document.createElement("textarea"); ta.value = fasta; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand && document.execCommand("copy"); ta.remove();
+      copyStatus(ok ? `Copied ${fmt(z - a + 1)} bp as FASTA` : "This browser blocked clipboard access; select the view and try again");
+    }
+  };
+
+  // chips: the largest contigs, in reference order
+  const CHIP_MAX = 40, TABLE_MAX = 100;
+  const bySize = CONTIGS.map((c, i) => i).sort((a, b) => CONTIGS[b].span - CONTIGS[a].span);
+  const chipSet = new Set(bySize.slice(0, CHIP_MAX));
+  $("chips").innerHTML = CONTIGS.map((c, i) => chipSet.has(i) ? `<button type="button" class="chip" aria-pressed="false" data-i="${i}">${esc(c.name)}</button>` : "").join("") +
+    (CONTIGS.length > CHIP_MAX ? `<span class="hint">+${fmt(CONTIGS.length - CHIP_MAX)} smaller contigs · type a name in the locus box</span>` : "");
+  $("chips").addEventListener("click", e => { const b = e.target.closest(".chip"); if (b) selectContig(+b.dataset.i); });
+
+  // per-contig table (largest TABLE_MAX rows; totals over everything shown)
+  const cols = [HAS_COMPARE ? "Kept" : "Calls", ...(HAS_SISTER ? ["Sister-masked"] : []), ...(HAS_COMPARE ? ["Removed"] : [])];
+  const totals = { span: 0, masked: 0, kept: BR.map(() => 0), flagged: BR.map(() => 0), removed: BR.map(() => 0) };
+  CONTIGS.forEach(c => { totals.span += c.span; totals.masked += c.maskedBp; BR.forEach((b, bi) => { totals.kept[bi] += c.kept[b].n; totals.flagged[bi] += c.kept[b].flagged; totals.removed[bi] += c.removed[b].n; }); });
+  const cells = (kept, flagged, removed) => `<td>${fmt(kept)}</td>` + (HAS_SISTER ? `<td>${pct(flagged, kept)}</td>` : "") + (HAS_COMPARE ? `<td>${fmt(removed)}</td>` : "");
+  const tableSet = new Set(bySize.slice(0, TABLE_MAX));
+  const rows = CONTIGS.map((c, i) => !tableSet.has(i) ? "" :
+    `<tr tabindex="0" data-i="${i}" aria-selected="false"><td>${esc(c.name)}</td><td>${fmt(c.span)}</td><td>${HAS_MASK ? pct(c.maskedBp, c.span) : "–"}</td>` +
+    BR.map(b => cells(c.kept[b].n, c.kept[b].flagged, c.removed[b].n)).join("") + `</tr>`).join("");
+  const head = `<thead><tr><th rowspan="2">Contig</th><th rowspan="2">${REGION_MODE ? "Shown (bp)" : "Length (bp)"}</th><th rowspan="2">Masked</th>${BR.map((b, bi) => `<th colspan="${cols.length}" style="text-align:center"><span class="th-s${bi + 1}"><i class="sw s${bi + 1}"></i>${esc(label(b))}</span></th>`).join("")}</tr>
+    <tr>${BR.map(() => cols.map(t => `<th>${t}</th>`).join("")).join("")}</tr></thead>`;
+  const foot = `<tfoot><tr><td>${REGION_MODE ? "Shown" : "Genome"}</td><td>${fmt(totals.span)}</td><td>${HAS_MASK ? pct(totals.masked, totals.span) : "–"}</td>${BR.map((b, bi) => cells(totals.kept[bi], totals.flagged[bi], totals.removed[bi])).join("")}</tr></tfoot>`;
+  $("genome").innerHTML = head + `<tbody>${rows}</tbody>` + foot;
+  if (CONTIGS.length > TABLE_MAX) { $("genome-note").textContent = `Showing the ${TABLE_MAX} largest of ${fmt(CONTIGS.length)} contigs; totals include all of them.`; $("genome-note").hidden = false; }
+  $("genome").addEventListener("click", e => { const r = e.target.closest("tbody tr"); if (r) { selectContig(+r.dataset.i); viewport.scrollIntoView({ block: "nearest" }); } });
+  $("genome").addEventListener("keydown", e => { const r = e.target.closest("tbody tr"); if (r && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); selectContig(+r.dataset.i); } });
+
+  // hotspots: windows sized to the genome (about 600 across everything shown)
+  const WIN = Math.min(1e6, Math.max(1000, niceAtLeast(totals.span / 600)));
+  const tally = want => {
+    const m = new Map();
+    CONTIGS.forEach((c, ci) => BR.forEach(b => {
+      const src = want.src(c, b);
+      for (let j = 0; j < src.n; j++) if (want.keep(src, j)) { const key = `${ci}:${Math.floor((src.pos[j] - 1) / WIN)}`; m.set(key, (m.get(key) || 0) + 1); }
+    }));
+    return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([key, n]) => {
+      const [ci, w] = key.split(":").map(Number), c = CONTIGS[ci];
+      return { ci, a: Math.max(c.start, w * WIN + 1), z: Math.min(c.end, (w + 1) * WIN), n };
+    });
+  };
+  const winNote = `Both branches, ${bpLabel(WIN, WIN)} windows.`;
+  const spots = [];
+  if (HAS_COMPARE) spots.push({ title: "Most calls removed by the mask", list: tally({ src: (c, b) => c.removed[b], keep: () => true }) });
+  if (HAS_SISTER) spots.push({ title: "Most calls from sister-masked sequence", list: tally({ src: (c, b) => c.kept[b], keep: (s, j) => s.flag[j] === 1 }) });
+  if (!spots.some(s => s.list.length)) spots.push({ title: "Densest calls", list: tally({ src: (c, b) => c.kept[b], keep: () => true }) });
+  const shown = spots.filter(s => s.list.length);
+  $("spots").innerHTML = shown.length ? shown.map(s => `<div><h3>${s.title}</h3><p>${winNote}</p><ol>${s.list.map(x =>
+    `<li><button type="button" data-ci="${x.ci}" data-a="${x.a}" data-z="${x.z}"><span>${esc(CONTIGS[x.ci].name)}:${fmt(x.a)}-${fmt(x.z)}</span><b>${fmt(x.n)}</b></button></li>`).join("")}</ol></div>`).join("")
+    : `<p class="hint">No calls in this run to jump to.</p>`;
+  $("spots").addEventListener("click", e => { const b = e.target.closest("button[data-ci]"); if (b) { selectContig(+b.dataset.ci, +b.dataset.a, +b.dataset.z); viewport.focus({ preventScroll: true }); viewport.scrollIntoView({ block: "nearest" }); } });
+
+  // header, legend, hint and notes from the run
+  const branchNames = BR.map(b => `<i>${esc(label(b))}</i>`).join(" and ");
+  document.title = `${REF} · CORAL`;
+  $("title").innerHTML = `<i>${esc(REF)}</i>`;
+  $("lede").innerHTML = (HAS_MASK ? `${esc(MASKER)} mask on the <i>${esc(REF)}</i> reference` : `The <i>${esc(REF)}</i> reference (no repeat mask)`) +
+    `, with CORAL calls on the ${branchNames} branches.` + (HAS_COMPARE ? " Above each axis: calls kept. Below: calls the mask removed." : "") +
+    (META.region ? ` Region ${esc(META.region)}.` : "");
+  $("legend").innerHTML = [
+    HAS_MASK ? `<span><i class="sw mask"></i>${esc(REF)} masked sequence</span>` : "",
+    ...BR.map((b, bi) => `<span><i class="sw s${bi + 1}"></i><i>${esc(label(b))}</i> calls</span>`),
+    HAS_SISTER ? `<span><i class="sw hatch"></i>hatched: from sequence masked in that sister</span>` : "",
+    HAS_COMPARE ? `<span><i class="sw mask"></i>below axis, grey: removed by the reference mask</span>` : "",
+    HAS_COMPARE ? `<span><i class="sw hatch-mask"></i>below axis, hatched: removed by the sister mask</span>` : "",
+  ].join("");
+  $("hint").innerHTML = `Scroll to zoom · drag or <kbd>←</kbd> <kbd>→</kbd> to pan · <kbd>+</kbd> <kbd>−</kbd> to zoom · hover for counts · zoom in to read the reference` +
+    (HAS_MASK ? ": masked bases are lowercase on grey, and each call shows the base its branch mutated to." : " and the base each call mutated to.");
+  const opt = (flag, value) => (value === undefined || value === null || value === false ? "" : value === true ? flag : `${flag} ${value}`);
+  const cmd = ["coral run_single", opt("--aligner-name", P.aligner_name), opt("--mapq", P.mapq), opt("--low-mapq", P.low_mapq),
+    P.repeat_mask ? `--repeat-mask ${P.repeat_masker || ""}`.trim() : "", opt("--suffix", P.suffix)].filter(Boolean).join(" ");
+  const frac = Math.round(100 * (P.repeat_mask_frac ?? 0.5));
+  const acc = (META.accessions || {})[META.reference];
+  $("notes").innerHTML = [
+    `Run <code>${esc(META.run_id)}</code>${META.coral_version ? `, CORAL ${esc(META.coral_version)}` : ""}: <code>${esc(cmd)}</code>.`,
+    HAS_MASK ? `The reference mask is a hard filter: no call sits on or next to a masked base.` + (HAS_SISTER ? ` Masks on the two sister genomes only drop fragments that are at least ${frac}% masked, so some calls (hatched) still come from masked sequence in that genome.` : "") : "",
+    HAS_COMPARE ? `Removed calls are calls in <code>${esc(META.compare)}</code>, made without the mask, that this run does not make.`
+      : (HAS_MASK ? `To add the calls the mask removed, run <code>coral view ${esc(META.run_id)} --compare UNMASKED_RUN</code>.` : ""),
+    `Sequence is the reference FASTA the run used${HAS_MASK ? `; lowercase marks CORAL's ${esc(MASKER)} mask` : ""}. Copy sequence gives the visible stretch as FASTA, up to 100 kb.`,
+    `Coordinates are 1-based on the <i>${esc(REF)}</i> assembly${acc ? ` (${esc(acc)})` : ""}.`,
+  ].filter(Boolean).map(t => `<li>${t}</li>`).join("");
+
+  // theme + resize
+  readTheme();
+  const mq = matchMedia("(prefers-color-scheme: dark)");
+  const retheme = () => { readTheme(); ovCache.clear(); schedule(); };
+  mq.addEventListener?.("change", retheme);
+  new MutationObserver(retheme).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  new ResizeObserver(() => { DPR = Math.max(1, window.devicePixelRatio || 1); patterns = {}; schedule(); }).observe(viewport);
+  document.fonts?.ready.then(schedule);
+
+  // open on the first hotspot so the first frame shows something to look at
+  const opener = shown.length ? shown[0].list[0] : null;
+  if (opener) selectContig(opener.ci, opener.a - WIN / 2, opener.z + WIN / 2);
+  else selectContig(bySize[0]);
+})();
+</script>
+</body>
+</html>

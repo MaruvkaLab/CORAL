@@ -81,6 +81,31 @@ class RepeatMask:
         i = int(starts.searchsorted(pos, "right")) - 1
         return i >= 0 and pos <= self._ends[chrom][i]
 
+    def contains_array(self, chrom, positions):
+        """Vectorised `contains`: a bool array, one entry per 1-based position."""
+        positions = np.asarray(positions, dtype=np.int64)
+        starts = self._starts.get(chrom)
+        out = np.zeros(positions.shape, bool)
+        if starts is None or len(starts) == 0 or positions.size == 0:
+            return out
+        i = starts.searchsorted(positions, "right") - 1
+        ok = i >= 0
+        out[ok] = positions[ok] <= self._ends[chrom][i[ok]]
+        return out
+
+    def intervals(self, chrom, start=1, end=None):
+        """(starts, ends) of the merged 1-based inclusive intervals on `chrom` that overlap
+        [start, end], clipped to it. `end=None` means the end of the last interval."""
+        starts = self._starts.get(chrom)
+        if starts is None or len(starts) == 0:
+            return np.empty(0, np.int64), np.empty(0, np.int64)
+        ends = self._ends[chrom]
+        if end is None:
+            end = int(ends[-1])
+        lo = int(ends.searchsorted(start, "left"))
+        hi = int(starts.searchsorted(end, "right"))
+        return np.maximum(starts[lo:hi], start), np.minimum(ends[lo:hi], end)
+
     def for_contig(self, chrom):
         """A RepeatMask holding only `chrom`'s intervals (shares the underlying
         lists, no copy). Lets the parallel extractor ship each worker just its
@@ -255,7 +280,8 @@ def build_mask(fasta_path, out_dir, tool="windowmasker", species=None, cores=1,
     else:
         raise ValueError(f"unknown repeat masker tool {tool!r} "
                          "(expected 'windowmasker' or 'repeatmasker')")
-    mask.to_bed(raw + ".repeats.bed")
+    mask.bed_path = raw + ".repeats.bed"     # kept by `run_single --viewer` before cleanup
+    mask.to_bed(mask.bed_path)
     total_bp = _total_bp(fasta_path)
     masked = mask.n_masked_bases
     pct = f"{100 * masked / total_bp:.1f}% of {total_bp:,} bp" if total_bp else "genome length unknown"

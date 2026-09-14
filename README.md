@@ -96,6 +96,23 @@ coral run_single \
 
 This runs the full pipeline, including genome download, reference indexing, read simulation, alignment, mutation extraction, and summary table and plot generation.
 
+### Browse a run
+
+Add `--viewer` to keep the reference sequence and repeat masks and write a browser of the run to
+`Viewer/<run_id>.html`: the repeat mask, the reference sequence down to single bases, and each
+branch's calls, with calls that came from sequence masked in that sister's own genome marked.
+Everything is embedded, so the file opens in any browser.
+
+```bash
+coral run_single ... --repeat-mask --viewer
+
+# rebuild later, adding the calls the mask removed (the same triplet run without --repeat-mask)
+coral view ../test_output/<run_id> --compare ../test_output/<unmasked_run_id>
+
+# genomes above 50 Mb: one contig or stretch at a time
+coral view ../test_output/<run_id> --region <contig>:1-2000000
+```
+
 ---
 
 ### Multi-species analysis (experimental)
@@ -169,6 +186,7 @@ Each run produces a self-contained output directory containing:
 * `Mutations/*_mutations.json` – trinucleotide mutation counts
 * `Tables/*.tsv` – normalized mutation spectra
 * `Plots/*.png` – diagnostic and summary plots
+* `Viewer/` – with `--viewer`: the inputs `coral view` needs and `<run_id>.html`, a browser of the mask, sequence and calls
 * `run_summary.json` – extraction diagnostics: pileup lines and why they were rejected, windows skipped over coverage gaps, and the classification of every scored site
 
 `run_summary.json` also records `ref_differs` – sites where both sister taxa

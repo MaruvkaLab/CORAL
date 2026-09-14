@@ -25,6 +25,9 @@ coral = "coral.cli:main"
 [tool.setuptools]
 packages = ["coral"]
 
+[tool.setuptools.package-data]
+coral = ["viewer_template.html"]
+
 [tool.setuptools.package-dir]
 "" = "src"
 

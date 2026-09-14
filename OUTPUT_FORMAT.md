@@ -18,6 +18,7 @@ CORAL creates a self-contained output directory for each run. The directory stru
       ├── Tables/                    # Normalized spectra tables
       ├── Plots/                     # Visualization plots
       ├── Intervals/                 # Read interval files (for coverage plots)
+      ├── Viewer/                    # --viewer: kept inputs and the HTML browser (coral view)
       ├── run_summary.json           # Extraction diagnostics (one per run/trio)
       └── pipeline_timings.json      # Pipeline execution timing information
 ```
@@ -197,6 +198,26 @@ Plots are generated with descriptive names:
 
 **Location:**
 `<run_id>/Plots/`
+
+### Viewer Files
+
+Written by `coral run_single --viewer`, and by `coral view`:
+
+- `Viewer/inputs/reference.fa.gz` (with `.fai` and `.gzi`) – the reference FASTA, bgzipped, kept before cleanup deletes the genome folders
+- `Viewer/inputs/mask.<genome>.bed` – merged repeat-mask intervals for each genome (BED, 0-based half-open); only with `--repeat-mask`
+- `Viewer/inputs/manifest.json` – reference, taxa, accessions, mask files and run parameters
+- `Viewer/<run_id>.html` – the browser, with its data embedded; `coral view --region` writes `Viewer/<run_id>__<region>.html`
+
+The page is built from those inputs, `Mutations/` and the final BAMs, so `coral view <run_dir>`
+can rebuild it at any time. A call is marked as coming from sister-masked sequence when every
+primary read covering it was fragmented from a masked base of that sister's genome. With
+`--compare <run_dir>` (the same triplet run without `--repeat-mask`), calls that run makes and
+this one does not are shown as removed: by the reference mask when they sit on or next to a
+masked reference base, otherwise by the sister mask. The page embeds at most 50,000,000 bp of
+sequence by default (`--max-genome-bp`); larger genomes are built one `--region` at a time.
+
+**Location:**
+`<run_id>/Viewer/`
 
 ### Multi-Species Pipeline Files
 

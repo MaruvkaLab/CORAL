@@ -40,6 +40,10 @@ def main():
                              "(default, library-free) or repeatmasker")
     single.add_argument("--repeat-species", dest="repeat_species", default=None, metavar="CLADE",
                         help="RepeatMasker library clade (e.g. 'drosophila'); only with --repeat-mask repeatmasker")
+    single.add_argument("--viewer", action="store_true",
+                        help="Keep the reference FASTA and repeat masks (Viewer/inputs) and write an HTML "
+                             "browser of the mask, sequence and calls (Viewer/<run>.html). Genomes above "
+                             "50 Mb keep the inputs only; build a region with `coral view --region`.")
 
     multi = subparsers.add_parser("run_multi", help="Run multi-species pipeline from Newick")
     multi.add_argument("--newick-tree", default=None)
@@ -92,6 +96,21 @@ def main():
     verbose_group_phylip.add_argument("--quiet", dest="verbose", action="store_false", help="Disable verbose logging")
     phylip.set_defaults(verbose=True)
 
+    # === View a finished run ===
+    view = subparsers.add_parser("view", help="Write an HTML browser of a run_single run made with --viewer")
+    view.add_argument("run_dir", help="Output directory of the run (contains Viewer/inputs)")
+    view.add_argument("--compare", default=None, metavar="RUN_DIR",
+                      help="Same triplet run without --repeat-mask; adds the calls the mask removed")
+    view.add_argument("--region", default=None, metavar="CONTIG[:START-END]",
+                      help="Embed only this contig or stretch (1-based, inclusive)")
+    view.add_argument("--output", default=None, help="HTML path (default: RUN_DIR/Viewer/<run>[__<region>].html)")
+    view.add_argument("--max-genome-bp", type=int, default=None, metavar="BP",
+                      help="Refuse to embed more sequence than this (default: 50,000,000)")
+    verbose_group_view = view.add_mutually_exclusive_group()
+    verbose_group_view.add_argument("--verbose", dest="verbose", action="store_true", help="Enable verbose logging (default: enabled)")
+    verbose_group_view.add_argument("--quiet", dest="verbose", action="store_false", help="Disable verbose logging")
+    view.set_defaults(verbose=True)
+
     args = parser.parse_args()
 
     try:
@@ -116,6 +135,7 @@ def main():
                 repeat_mask=bool(args.repeat_mask),
                 repeat_masker=args.repeat_mask or "windowmasker",
                 repeat_species=args.repeat_species,
+                viewer=args.viewer,
             )
             pipeline.run()
 
@@ -142,6 +162,11 @@ def main():
                 max_memory_mb=args.max_memory_mb,
             )
             pipeline.run()
+
+        elif args.subcmd == "view":
+            from .viewer import DEFAULT_MAX_GENOME_BP, build_viewer
+            build_viewer(args.run_dir, output=args.output, compare=args.compare, region=args.region,
+                         max_genome_bp=args.max_genome_bp or DEFAULT_MAX_GENOME_BP, verbose=args.verbose)
 
         elif args.subcmd == "run_phylip":
             from .run_phylip import run_phylip
