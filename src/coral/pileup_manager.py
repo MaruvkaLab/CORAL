@@ -7,18 +7,20 @@ from .utils import log, run_cmd
 #: identity is what makes a chromosome's pileup a slice of the whole-genome one,
 #: so they must be built from here rather than spelled out twice.
 MPILEUP_OPTS = ["-B", "-d", "100"]
+ANNOTATE_OPTS = ["-B", "-d", "0", "-s", "--output-extra", "ZN"]   # annotate: all reads, their MAPQ and ZN
 
 
-def mpileup_cmd(ref_fasta, bams, region=None):
+def mpileup_cmd(ref_fasta, bams, region=None, annotate=False):
     """Build the mpileup argv. ``region`` adds ``-r``; everything else is fixed."""
-    cmd = ["samtools", "mpileup", "-f", ref_fasta] + MPILEUP_OPTS
+    cmd = ["samtools", "mpileup", "-f", ref_fasta] + (ANNOTATE_OPTS if annotate else MPILEUP_OPTS)
     if region is not None:
         cmd += ["-r", region]
     return cmd + list(bams)
 
 
 class Pileup:
-    def __init__(self, outgroup, aligners, base_output_dir, run_id = None, no_cache=False, verbose=True):
+    def __init__(self, outgroup, aligners, base_output_dir, run_id = None, no_cache=False, verbose=True,
+                 annotate=False):
         self.reference = outgroup.name
         self.output_dir = base_output_dir
         self.outgroup = outgroup
@@ -28,8 +30,11 @@ class Pileup:
         self.bams = aligners
         self.taxon_names = [aligner.species for aligner in self.bams]
         self.run_id = run_id if run_id else f"{self.reference}__{'__'.join(self.taxon_names)}"
+        # annotate Each BAM with per-read MAPQ (-s) and per-read ZN tag
+        self.annotate = annotate
 
-        self.pileup_path = f"{self.output_dir}/{self.run_id}.pileup.gz"
+        suffix = ".annotated.pileup.gz" if annotate else ".pileup.gz"
+        self.pileup_path = f"{self.output_dir}/{self.run_id}{suffix}"
 
     def _check_file(self, path):
         if not os.path.isfile(path):
@@ -46,7 +51,7 @@ class Pileup:
             return self.pileup_path
 
         log(f"Generating pileup: {self.pileup_path}", self.verbose)
-        cmd = mpileup_cmd(self.ref_fasta, [bam.final_bam for bam in self.bams])
+        cmd = mpileup_cmd(self.ref_fasta, [bam.final_bam for bam in self.bams], annotate=self.annotate)
 
         # Use a temporary file for atomic write
         tmp_path = self.pileup_path + ".tmp"

@@ -147,6 +147,11 @@ fine; calling it from `python -c` or from stdin is not.
 * Filter alignments by MAPQ and coverage
 * Allow customization of aligner and parameters
 
+**Aligner constraint.** A custom aligner (`--aligner-cmd`) must write one primary record per read, in the same order as the input FASTQ.
+The continuity filter treats consecutive records as neighbouring fragments of the source genome, so an aligner that reorders its output silently breaks the filter.
+BWA, BWA-MEM2 and minimap2 preserve input order by default.
+BBMap does not, so its command must include `ordered=t`.
+
 ### Step 3: Mutation detection
 
 * Generate pileups from reference and aligned BAMs

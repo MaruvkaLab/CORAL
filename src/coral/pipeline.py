@@ -1,5 +1,3 @@
-# species_mutation_extraction/mutextractor/pipeline.py
-
 import json
 import os
 import re
@@ -22,6 +20,7 @@ from .pileup_manager import Pileup
 from .plot_utils import CoveragePlotter, MutationDensityPlotter, MutationSpectraPlotter
 from .utils import get_top_n_chromosomes, log
 from .repeat_masker import build_mask
+from .annotation import write_annotated_outputs
 import psutil
 import pysam
 
@@ -94,20 +93,18 @@ class MutationExtractionPipeline:
         self.output_dir = f"{base_output_dir}/{self.run_id}{suffix}"
         self.params = kwargs
 
-        # Will hold references to internal data
         self.reference = None
         self.genomes = []
         self.alignments = []
         self.align_times = {}
         self.genome_stats = {}
-        self.reference_mask = None    # RepeatMask on the outgroup, if --repeat-mask
+        self.reference_mask = None    # outgroup RepeatMask
         self.verbose = verbose
         self.no_cache = no_cache
 
-    def _build_repeat_mask(self, genome):
-        """Build (cached) a repeat mask for `genome` if --repeat-mask is on, else
-        None. Uses WindowMasker by default (library-free); RepeatMasker if selected."""
-        if not self.params.get("repeat_mask", False):
+    def _build_repeat_mask(self, genome, force=False):
+        """Cached repeat mask for `genome` if --repeat-mask is on or force, else None."""
+        if not (force or self.params.get("repeat_mask", False)):
             return None
         return build_mask(
             genome.fasta_path, genome.output_dir,
@@ -150,10 +147,13 @@ class MutationExtractionPipeline:
         timed_stage("Download and Fragment Genomes", self.download_index_and_fragment_genomes)
         timed_stage("Align Species", self.align_species)
         timed_stage("Generate Pileup", self.generate_pileup)
-        timed_stage("Extract Mutations and Triplets", self.extract_mutations_and_triplets)
-        timed_stage("Extract Intervals", self.extract_intervals)
-        if self.params.get("plots", True):
-            timed_stage("Run Plots", self.run_plots)
+        if self.params.get("annotate", False):
+            timed_stage("Extract Annotated Calls", self.extract_annotated)
+        else:
+            timed_stage("Extract Mutations and Triplets", self.extract_mutations_and_triplets)
+            timed_stage("Extract Intervals", self.extract_intervals)
+            if self.params.get("plots", True):
+                timed_stage("Run Plots", self.run_plots)
         self.genome_stats = self._collect_genome_stats()  # before cleanup removes the FASTAs
         timed_stage("Cleanup files", self.cleanup)
 
@@ -227,8 +227,6 @@ class MutationExtractionPipeline:
         log(f"Run summary saved to: {path}", self.verbose)
 
     def download_index_and_fragment_genomes(self):
-        # log("Downloading, indexing, and fragmenting genomes...", self.verbose)
-
         # Reference genome (outgroup)
         ref_name, ref_acc = self.outgroup
         self.reference = Genome(
@@ -240,8 +238,9 @@ class MutationExtractionPipeline:
         )
         self.reference.download()
         self.reference.index(aligner=self.aligner_name)
-        # Outgroup repeat mask -> used to drop calls at reference repeat positions.
-        self.reference_mask = self._build_repeat_mask(self.reference)
+        # Normal runs drop calls at outgroup repeats; annotate mode flags them.
+        self.reference_mask = self._build_repeat_mask(
+            self.reference, force=self.params.get("annotate", False))
 
         # Ingroup genomes
         for name, acc in self.species_list:
@@ -253,7 +252,7 @@ class MutationExtractionPipeline:
                 verbose=self.verbose
             )
             genome.download()
-            # Species repeat mask -> don't even generate pseudo-reads from repeats.
+            # No pseudo-reads from species repeats.
             species_mask = self._build_repeat_mask(genome)
             genome.generate_fragment_fastq(
                 length=self.params.get("fragment_length", 150),
@@ -264,8 +263,6 @@ class MutationExtractionPipeline:
             self.genomes.append(genome)
 
     def align_species(self):
-        # log("Aligning species to reference...", self.verbose)
-
         for genome in self.genomes:
             aligner = Aligner(
                 species_genome=genome,
@@ -275,6 +272,7 @@ class MutationExtractionPipeline:
                 aligner_name=self.aligner_name,              
                 cores=self.params.get("cores", None),
                 verbose=self.verbose,
+                annotate=self.params.get("annotate", False),
             )
 
             t0 = time.time()
@@ -297,9 +295,6 @@ class MutationExtractionPipeline:
 
 
     def generate_pileup(self):
-        # log("Generating pileup from alignments...", self.verbose)
-
-        # Ensure aligners were run and final BAMs are available
         for aligner in self.alignments:
             if not os.path.exists(aligner.final_bam):
                 raise FileNotFoundError(f"BAM not found: {aligner.final_bam}")
@@ -310,7 +305,8 @@ class MutationExtractionPipeline:
             base_output_dir=self.output_dir,
             run_id=self.run_id,
             no_cache=self.no_cache,
-            verbose=self.verbose
+            verbose=self.verbose,
+            annotate=self.params.get("annotate", False),
         )
         
         self.pileup = pileup_generator
@@ -318,10 +314,8 @@ class MutationExtractionPipeline:
 
         cores = self.params.get("cores")
         parallel_extract = bool(cores) and cores > 1
-        # In parallel mode the extractor generates per-chromosome pileups directly
-        # from the indexed BAMs, so the whole-genome pileup is only needed for the
-        # serial scan or the (opt-in) 5-mer pass.
-        if not parallel_extract or self.params.get("five_mer", False):
+        # Parallel extraction makes per-chromosome pileups; the serial, 5-mer and annotated scans need the whole genome.
+        if not parallel_extract or self.params.get("five_mer", False) or self.params.get("annotate", False):
             self.pileup_path = pileup_generator.generate()
         else:
             log("Parallel extraction enabled: skipping whole-genome pileup "
@@ -329,13 +323,10 @@ class MutationExtractionPipeline:
 
 
     def extract_mutations_and_triplets(self):
-        # log("Extracting 3mer mutations and triplets from pileup...", self.verbose)
         cores = self.params.get("cores")
         mut_dir = os.path.join(self.output_dir, 'Mutations')
         trip_dir = os.path.join(self.output_dir, 'Triplets')
-        # cores>1 -> chromosome-parallel extraction via per-chromosome mpileup
-        # (byte-identical output); otherwise the unchanged serial scan over the
-        # whole-genome pileup (no added overhead on a single core).
+        # cores > 1: chromosome-parallel extraction, identical output
         if cores and cores > 1:
             mutation_extractor = ParallelMutationExtractor(
                 reference=self.reference.name,
@@ -365,9 +356,7 @@ class MutationExtractionPipeline:
                 ref_mask=self.reference_mask)
         mutation_extractor.extract()
 
-        # 5-mer extraction is an extra full pass over the pileup and is not used
-        # by the standard (96-category, trinucleotide) outputs or normalization,
-        # so it is opt-in. Enable with five_mer=True (CLI: --five-mer).
+        # 5-mers are opt-in (--five-mer): an extra pass not used by the standard outputs
         if self.params.get("five_mer", False):
             fivemer_extractor = FiveMerExtractor(reference=self.reference.name,
                                   taxon1=self.genomes[0].name,
@@ -378,16 +367,6 @@ class MutationExtractionPipeline:
                                   verbose=self.verbose)
             fivemer_extractor.extract()
 
-        # log("Extracting triplets from pileup...", self.verbose)
-        # triplet_extractor = TripletExtractor(reference=self.reference.name,
-        #                       taxon1=self.genomes[0].name,
-        #                       taxon2=self.genomes[1].name,
-        #                       pileup_file=self.pileup_path,
-        #                       output_dir=os.path.join(self.output_dir, 'Triplets'),
-        #                       no_cache=False,
-        #                       verbose=self.verbose)
-        # triplet_extractor.extract()
-
         normalizer = MutationNormalizer(
             input_dir=self.output_dir,
             output_dir= os.path.join(self.output_dir, "Tables"),
@@ -395,6 +374,17 @@ class MutationExtractionPipeline:
             divergence_time= self.params.get("divergence_time", None),
         )
         normalizer.normalize()
+
+    def extract_annotated(self):
+        write_annotated_outputs(
+            pileup_path=self.pileup_path,
+            output_dir=os.path.join(self.output_dir, "Annotated"),
+            reference=self.reference.name,
+            taxon1=self.genomes[0].name,
+            taxon2=self.genomes[1].name,
+            ref_mask=self.reference_mask,
+            no_cache=self.no_cache,
+            verbose=self.verbose)
 
     def _extract_bam_intervals(self, input_bam, output_dir, assume_sorted=False, merge=False, no_cache=False):
             os.makedirs(output_dir, exist_ok=True)
@@ -612,16 +602,13 @@ class MultiSpeciesMutationPipeline:
         # Fitch runs later on PHYLIP's tree (see run()).
         self.annotated_tree, self.terminal_mapping, self.species_list = annotate_tree_with_indices(self.newick_tree, self.outgroup_name, verbose=self.verbose)
 
-        # Rebuild species_dict in the same order as species_list (outgroup first),
-        # so self.genomes and self.alignments follow the same ordering.
+        # same order as species_list (outgroup first)
         self.species_dict = {name: accession_lookup[name] for name in self.species_list}
 
         tree_path = os.path.join(self.output_dir, "annotated_tree.nwk")
         save_annotated_tree(self.annotated_tree, tree_path)
         with open(os.path.join(self.output_dir, "species_mapping.json"), 'w') as f:
             json.dump(self.terminal_mapping, f, indent=2)
-        #with open(os.path.join(self.output_dir, "species_mapping2.json"), 'w') as f:
-        #    json.dump(self.species_dict, f, indent=2)
 
     def parse_and_annotate_list(self):
         if not self.outgroup_name:
@@ -631,14 +618,11 @@ class MultiSpeciesMutationPipeline:
 
         self.species_list, self.terminal_mapping = annotate_list_with_indices(self.species_list, self.outgroup_name, verbose=self.verbose)
 
-        # Rebuild species_dict in the same order as species_list (outgroup first),
-        # so self.genomes and self.alignments follow the same ordering.
+        # same order as species_list (outgroup first)
         self.species_dict = {name: accession_lookup[name] for name in self.species_list}
 
         with open(os.path.join(self.output_dir, "species_mapping.json"), 'w') as f:
             json.dump(self.terminal_mapping, f, indent=2)
-        #with open(os.path.join(self.output_dir, "species_mapping2.json"), 'w') as f:
-        #    json.dump(self.species_dict, f, indent=2)
 
 
     def download_index_and_fragment(self):
@@ -797,58 +781,3 @@ class MultiSpeciesMutationPipeline:
             mapping=self.terminal_mapping,
             verbose=self.verbose
         )
-
-
-if __name__ == "__main__":
-    species = [
-        ("Drosophila_pseudoobscura", "GCF_009870125.1"),
-        ("Drosophila_miranda", "GCF_003369915.1")
-    ]
-    outgroup = ("Drosophila_helvetica", "GCA_963969585.1")
-
-    pipeline = MutationExtractionPipeline(
-        species_list=species,
-        outgroup=outgroup,
-        aligner_name="bwa-mem2",
-        base_output_dir="../Output_OO",
-        mapq=60, 
-        suffix= 'MAPQ60',
-        cores=16
-    )
-    pipeline.run()
-
-    species_list = [("Drosophila_pseudoobscura", "GCF_009870125.1"),
-                    ("Drosophila_miranda", "GCF_003369915.1"),
-                    ("Drosophila_helvetica", "GCA_963969585.1")]
-    run_id = 'drosophila1_run_mutiple_species'
-    pipeline = MultiSpeciesMutationPipeline(species_list=species_list,
-                                            base_output_dir="../Output_OO",
-                                            run_id=run_id,
-                                            outgroup='Drosophila_helvetica',
-                                            cores=16)
-    
-    pipeline.run()
-    """
-    newick_tree = "(((Drosophila_sechellia|GCF_004382195.2,Drosophila_melanogaster|GCF_000001215.4),Drosophila_mauritiana|GCF_004382145.1),Drosophila_santomea|GCF_016746245.2);"
-    
-    run_id = 'drosophila2_run_mutiple_species'
-    pipeline = MultiSpeciesMutationPipeline(newick_tree,
-                                            base_output_dir="../Output_OO",
-                                            run_id=run_id,
-                                            outgroup='Drosophila_santomea')
-    """
-    """
-    species_list = [('Drosophila_sechellia','GCF_004382195.2'),
-                    ('Drosophila_melanogaster','GCF_000001215.4'),
-                    ('Drosophila_mauritiana', 'GCF_004382145.1'), 
-                    ('Drosophila_santomea','GCF_016746245.2')]
-
-    run_id = 'drosophila1_run_mutiple_species'
-    pipeline = MultiSpeciesMutationPipeline(species_list=species_list,
-                                            base_output_dir="../Output_OO",
-                                            run_id=run_id,
-                                            outgroup='Drosophila_santomea')
-    
-    pipeline.run()
-    """
-

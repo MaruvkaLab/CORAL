@@ -40,6 +40,11 @@ def main():
                              "(default, library-free) or repeatmasker")
     single.add_argument("--repeat-species", dest="repeat_species", default=None, metavar="CLADE",
                         help="RepeatMasker library clade (e.g. 'drosophila'); only with --repeat-mask repeatmasker")
+    single.add_argument("--annotate", action="store_true",
+                        help="Evaluation mode: keep all reads with MAPQ >= --low-mapq, tag each with its "
+                             "best overlapping neighbour, and write every call with the MAPQ threshold "
+                             "range (with and without continuity) at which it is made, to Annotated/. "
+                             "--mapq and --continuity are not used; standard spectra and plots are skipped")
 
     multi = subparsers.add_parser("run_multi", help="Run multi-species pipeline from Newick")
     multi.add_argument("--newick-tree", default=None)
@@ -116,6 +121,7 @@ def main():
                 repeat_mask=bool(args.repeat_mask),
                 repeat_masker=args.repeat_mask or "windowmasker",
                 repeat_species=args.repeat_species,
+                annotate=args.annotate,
             )
             pipeline.run()
 

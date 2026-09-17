@@ -88,6 +88,9 @@ def filter_sam(
             print(msg, file=sys.stderr)
             log_to_file(log_path, msg)
 
+    # The caller may close the underlying pipe right after this returns, which
+    # would drop whatever is still buffered here (the last reads of the run).
+    output_stream.flush()
     write_summary()
     plot_histogram()
     return {
@@ -196,7 +199,7 @@ def with_continuity_filter_sam(
     try:
         for read in bamfile.fetch():
             total_reads += 1
-            if read.is_unmapped or read.is_secondary or read.is_supplementary:
+            if read.is_unmapped or read.is_secondary:
                 filtered_poor_mapping += 1
                 continue
             if read.mapping_quality < low_mapq:
@@ -231,6 +234,81 @@ def with_continuity_filter_sam(
 
 
 
+def annotate_sam(
+    input_stream,
+    output_stream,
+    low_mapq: int = 1,
+    tag: str = "ZN",
+    verbose: bool = True,
+    log_path: Optional[str] = None,
+):
+    """Writes every primary mapped read with MAPQ >= low_mapq and adds an
+    integer tag: the highest MAPQ of a neighbouring fragment that overlaps this
+    read on the same reference, or -1 if none. """
+    total_reads = written = filtered_poor_mapping = filtered_mapq = filtered_chrom = 0
+    skip_contigs = {'Un', 'random', 'alt', 'fix', 'hap'}
+
+    bamfile = pysam.AlignmentFile(input_stream, "rb")
+    try:
+        output_sam = pysam.AlignmentFile(output_stream, "wh", template=bamfile)
+    except Exception:
+        bamfile.close()
+        raise
+
+    def best_overlap(read, others):
+        best = -1
+        for other in others:
+            if other.reference_name == read.reference_name and \
+               max(read.reference_start, other.reference_start) < min(read.reference_end, other.reference_end):
+                best = max(best, other.mapping_quality)
+        return best
+
+    def emit(reads, before, after):
+        nonlocal written, filtered_chrom
+        for read in reads:
+            if any(keyword in read.reference_name for keyword in skip_contigs):
+                filtered_chrom += 1
+                continue
+            read.set_tag(tag, max(best_overlap(read, before), best_overlap(read, after)), value_type='i')
+            output_sam.write(read)
+            written += 1
+
+    prev_reads, cur_reads, next_reads = [], [], []
+    next_read_name = None
+    try:
+        for read in bamfile.fetch(until_eof=True):
+            total_reads += 1
+            if read.is_unmapped or read.is_secondary:
+                filtered_poor_mapping += 1
+                continue
+            if read.mapping_quality < low_mapq:
+                filtered_mapq += 1
+                continue
+            if next_read_name == read.query_name:
+                next_reads.append(read)
+            else:
+                emit(cur_reads, prev_reads, next_reads)
+                prev_reads, cur_reads, next_reads = cur_reads, next_reads, [read]
+                next_read_name = read.query_name
+        emit(cur_reads, prev_reads, next_reads)
+        emit(next_reads, cur_reads, [])
+    finally:
+        bamfile.close()
+        output_sam.close()
+
+    stats = {
+        "total_reads": total_reads,
+        "written_reads": written,
+        "filtered_poor_mapping": filtered_poor_mapping,
+        "filtered_low_mapq": filtered_mapq,
+        "filtered_alt_contig": filtered_chrom,
+    }
+    for line in ["Annotate summary:"] + [f"  {k}: {v}" for k, v in stats.items()]:
+        log(line, verbose)
+        log_to_file(log_path, line)
+    return stats
+
+
 class Aligner:
     def __init__(
         self,
@@ -241,7 +319,8 @@ class Aligner:
         aligner_name=None,
         no_cache=False,
         cores = None,
-        verbose=True
+        verbose=True,
+        annotate=False
     ):
         self.species = species_genome.name
         self.reference = reference_genome.name
@@ -256,7 +335,11 @@ class Aligner:
         self.bam_dir = f"{self.output_dir}/BAMs"
         self.plots_dir = f"{self.output_dir}/Plots"
         self.raw_bam = f"{self.bam_dir}/{self.species}_to_{self.reference}_raw.bam"
-        self.final_bam = f"{self.bam_dir}/{self.species}_to_{self.reference}.bam"
+        # annotate: annotate_sam replaces the MAPQ filter (all reads >= low_mapq, ZN tag).
+        # Separate final BAM name so annotated and filtered BAMs never share a cache.
+        self.annotate = annotate
+        suffix = "_annotated" if annotate else ""
+        self.final_bam = f"{self.bam_dir}/{self.species}_to_{self.reference}{suffix}.bam"
         self.hist_name = f"{self.species}_to_{self.reference}.png"
         self.log_path = self.final_bam.replace(".bam", ".log")
         self.filter_stats = None  # populated when this run actually filters (not when cached)
@@ -280,7 +363,7 @@ class Aligner:
             "bwa-mem2": "bwa-mem2 mem -t {cores} {ref} {fq}",
             "minimap2": "minimap2 -t {cores} -ax sr {ref} {fq}",
             #"bbmap": "bbmap.sh ref={ref} threads={cores} in={fq} out=stdout.sam"
-            "bbmap": "bbmap.sh ref={ref} threads={cores} in={fq} out=stdout.sam path={tmp}"
+            "bbmap": "bbmap.sh ref={ref} threads={cores} in={fq} out=stdout.sam ordered=t path={tmp}"
 
         }
         if name not in commands:
@@ -315,7 +398,15 @@ class Aligner:
         assert align_proc.stdout and sort_proc.stdin
 
         with TextIOWrapper(align_proc.stdout) as reader, TextIOWrapper(sort_proc.stdin, write_through=True, buffering=1) as writer:
-            if continuity:
+            if self.annotate:
+                self.filter_stats = annotate_sam(
+                    input_stream=reader,
+                    output_stream=writer,
+                    low_mapq=low_mapq,
+                    verbose=self.verbose,
+                    log_path=self.log_path
+                )
+            elif continuity:
                 self.filter_stats = with_continuity_filter_sam(
                 input_stream=reader,
                 output_stream=writer,
@@ -368,7 +459,15 @@ class Aligner:
             sort_proc = subprocess.Popen(["samtools", "sort", "-@", str(self.cores), "-o", tmp_final_bam], stdin=subprocess.PIPE)
             assert view_proc.stdout and sort_proc.stdin
 
-            if continuity:
+            if self.annotate:
+                self.filter_stats = annotate_sam(
+                    input_stream=TextIOWrapper(view_proc.stdout),
+                    output_stream=TextIOWrapper(sort_proc.stdin),
+                    low_mapq=low_mapq,
+                    verbose=self.verbose,
+                    log_path=self.log_path
+                )
+            elif continuity:
                 self.filter_stats = with_continuity_filter_sam(
                     input_stream=TextIOWrapper(view_proc.stdout),
                     output_stream=TextIOWrapper(sort_proc.stdin),
