@@ -51,7 +51,8 @@ def site_intervals(depth, bases, mapqs, zns):
     for token, q, zn in zip(split_reads(bases), mapqs, zns.split(',')):
         base = token[2] if token[0] == '^' else token[0]
         base = '.' if base in '.,' else base.upper()
-        rejects = '*' in token or '+' in token
+        body = token[2:] if token[0] == '^' else token   # '^' + MAPQ as a character, which can be * or +
+        rejects = '*' in body or '+' in body
         plain.append((ord(q) - 33, base, rejects))
         rescued.append((ALWAYS_KEPT if int(zn) >= 0 else ord(q) - 33, base, rejects))
     return _interval(plain), _interval(rescued)

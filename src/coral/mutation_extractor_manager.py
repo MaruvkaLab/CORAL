@@ -91,11 +91,14 @@ def quality_check(line, dropped=None):
             dropped['unparsed'] += 1
         return False
     fields = line.fields
-    if '*' in fields[NUC_1_IDX] or '*' in fields[NUC_2_IDX]: # deletions
+    # a read start is '^' + its MAPQ as a character, which can be * or +
+    bases1 = re.sub(r'\^.', '', fields[NUC_1_IDX])
+    bases2 = re.sub(r'\^.', '', fields[NUC_2_IDX])
+    if '*' in bases1 or '*' in bases2: # deletions
         if dropped is not None:
             dropped['deletion'] += 1
         return False
-    if '+' in fields[NUC_1_IDX] or '+' in fields[NUC_2_IDX]: # insertions
+    if '+' in bases1 or '+' in bases2: # insertions
         if dropped is not None:
             dropped['insertion'] += 1
         return False
