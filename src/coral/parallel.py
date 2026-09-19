@@ -184,33 +184,23 @@ SCAN_MB_PER_JOB = 1500
 def scan_stream(extractor, stream, write_row):
     """Run the 3-line sliding window over one pileup text stream.
 
-    A transcription of the loop in ``MultipleSpeciesMutationExtractor.extract``;
-    every decision is delegated to that extractor's own methods. Returns this
-    stream's triplet context counts.
+    The same windows as ``MultipleSpeciesMutationExtractor._scan_pileup_serial``
+    (the extractor's own ``_windows``), and every decision is delegated to that
+    extractor's own methods. Returns this stream's triplet context counts.
     """
     triplet_counts = defaultdict(int)
 
-    buffer = [None,
-              extractor._parse_line(stream.readline()),
-              extractor._parse_line(stream.readline())]
-    qc_flags = [False,
-                extractor._quality_check(buffer[1]),
-                extractor._quality_check(buffer[2])]
-
-    for line in stream:
-        buffer = [buffer[1], buffer[2], extractor._parse_line(line)]
-        qc_flags = [qc_flags[1], qc_flags[2], extractor._quality_check(buffer[2])]
-        if all(qc_flags) and extractor._consecutive(*buffer):
-            result, triplet = extractor._detect_site(buffer)
-            if triplet is not None:
-                triplet_counts[triplet] += 1
-            if result is not None:
-                write_row(result)
+    for buffer in extractor._windows(stream):
+        result, triplet = extractor._detect_site(buffer)
+        if triplet is not None:
+            triplet_counts[triplet] += 1
+        if result is not None:
+            write_row(result)
 
     return triplet_counts
 
 
-def _scan_region(chrom, ref_fasta, bams, n_species, species_list, mapping, rows_path):
+def _scan_region(chrom, ref_fasta, bams, n_species, species_list, mapping, rows_path, indel_window=1):
     """Worker: pileup one chromosome and scan it.
 
     Returns ``(chrom, triplet_counts, rows_path or None)``. Detected rows go to
@@ -232,6 +222,7 @@ def _scan_region(chrom, ref_fasta, bams, n_species, species_list, mapping, rows_
         mapping=mapping,
         no_cache=True,
         verbose=False,
+        indel_window=indel_window,
     )
 
     cmd = mpileup_cmd(ref_fasta, bams, region=chrom)
@@ -314,7 +305,7 @@ def scan_pileup_parallel(extractor, csv_path, triplets_path, header):
     try:
         args = [(c, extractor.ref_fasta, extractor.bams, extractor.n_species,
                  extractor.species_list, extractor.mapping,
-                 os.path.join(tmp_dir, f"{i:05d}.rows"))
+                 os.path.join(tmp_dir, f"{i:05d}.rows"), extractor.indel_window)
                 for i, c in enumerate(tasks)]
 
         if n_workers <= 1:

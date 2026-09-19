@@ -281,6 +281,8 @@ whose three lines pass QC and lie on one contig but are not at adjacent position
 window spans a coverage gap. Windows spanning a contig boundary are never formed and are
 not counted, so that the whole-genome scan and the per-chromosome parallel scan produce
 identical summaries.
+`near_indel` (only with `--indel-window` K > 1) is windows left out because a read has a
+deleted base or an insertion within K bp of their middle base.
 
 **`site_classes`** counts the windows that were scored, partitioning them:
 

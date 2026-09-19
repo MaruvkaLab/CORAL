@@ -341,7 +341,8 @@ class MutationExtractionPipeline:
                 no_full_mutations=False,
                 no_cache=self.no_cache,
                 verbose=self.verbose,
-                ref_mask=self.reference_mask)
+                ref_mask=self.reference_mask,
+                indel_window=self.params.get("indel_window", 1))
         else:
             mutation_extractor = MutationExtractor(
                 reference=self.reference.name,
@@ -353,7 +354,8 @@ class MutationExtractionPipeline:
                 no_full_mutations=False,
                 no_cache=self.no_cache,
                 verbose=self.verbose,
-                ref_mask=self.reference_mask)
+                ref_mask=self.reference_mask,
+                indel_window=self.params.get("indel_window", 1))
         mutation_extractor.extract()
 
         # 5-mers are opt-in (--five-mer): an extra pass not used by the standard outputs
@@ -384,7 +386,8 @@ class MutationExtractionPipeline:
             taxon2=self.genomes[1].name,
             ref_mask=self.reference_mask,
             no_cache=self.no_cache,
-            verbose=self.verbose)
+            verbose=self.verbose,
+            indel_window=self.params.get("indel_window", 1))
 
     def _extract_bam_intervals(self, input_bam, output_dir, assume_sorted=False, merge=False, no_cache=False):
             os.makedirs(output_dir, exist_ok=True)
@@ -765,6 +768,7 @@ class MultiSpeciesMutationPipeline:
         max_memory_mb=self.max_memory_mb,
         fitch_jobs=self.fitch_jobs,
         parallel_fitch=self._stage_parallel(self.fitch_jobs),
+        indel_window=self.params.get("indel_window", 1),
         **parallel_scan_kwargs
         )
         extractor.extract()

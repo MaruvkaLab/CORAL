@@ -6,7 +6,7 @@ import multiprocessing
 import subprocess
 import tempfile
 from io import TextIOWrapper
-from collections import defaultdict
+from collections import defaultdict, deque
 
 try:
     from .utils import log
@@ -88,13 +88,14 @@ def all_same(seq):
 def sample_problem(depth, bases, cleaned):
     """Why one sample's reads can't be used at a pileup position, or None. `cleaned` is clean_bases(bases).
     Shared by the two-taxa and the multi-species scans."""
-    bases = re.sub(r'\^.', '', bases)   # a read start is '^' + its MAPQ as a character, which can be * or +
+    if int(depth) < MIN_DEPTH:
+        return 'no_depth'   # checked first: no reads is written as a lone '*', not a deletion
+    if '^' in bases:
+        bases = re.sub(r'\^.', '', bases)   # a read start is '^' + its MAPQ as a character, which can be * or +
     if '*' in bases:
         return 'deletion'
     if '+' in bases:
         return 'insertion'
-    if int(depth) < MIN_DEPTH:
-        return 'no_depth'
     if not all_same(cleaned.replace(',', '.').lower()):
         return 'reads_disagree'
     return None
@@ -117,10 +118,77 @@ def quality_check(line, dropped=None):
 
 
 def consecutive(*lines):
+    if len(lines) == 3:   # the scan's window, compared directly
+        a, b, c = lines
+        return (a[CHR_IDX] == b[CHR_IDX] == c[CHR_IDX]
+                and int(a[POSITION_IDX]) + 1 == int(b[POSITION_IDX]) == int(c[POSITION_IDX]) - 1)
     chrom = lines[0][CHR_IDX]
     positions = [int(line[POSITION_IDX]) for line in lines]
     return (all(line[CHR_IDX] == chrom for line in lines)
             and all(positions[i] + 1 == positions[i + 1] for i in range(len(positions) - 1)))
+
+
+def has_indel(depth, bases):
+    """A deleted base (*) or an insertion right after the base (+N) among one sample's reads. A sample with no
+    reads here is written as depth 0 with a lone '*', which is not a deletion."""
+    if depth == '0' or ('*' not in bases and '+' not in bases):
+        return False
+    if '^' in bases:
+        bases = re.sub(r'\^.', '', bases)   # a read start is '^' + its MAPQ as a character, which can be * or +
+    return '*' in bases or '+' in bases
+
+
+def scan_windows(lines, parse, clean, event=None, indel_window=1, masked=None, combine=max, stats=None):
+    """ Yield clean 3-base windows from ordered pileup lines. Each yielded item is ``(window, near)``, 
+    where ``window`` contains three consecutive clean, non-masked positions from the same chromosome. 
+    If ``indel_window == 1``, ``near`` is always None and windows are yielded immediately. 
+    If ``indel_window = k > 1``, ``near`` combines events found within k bp of the middle base, including events on masked lines. 
+    ``stats`` tracks non-masked lines, masked lines, and clean but non-consecutive 3-line windows. """
+    if indel_window < 1:
+        raise ValueError(f"indel_window must be at least 1, got {indel_window}")
+    k = indel_window
+    n_lines = n_masked = n_gaps = 0
+    l0 = l1 = None             # the two previous lines and whether they were clean
+    ok0 = ok1 = False
+    pending, recent = deque(), deque()      # windows waiting for their right side; events near the scan
+    for raw in lines:
+        is_masked = masked is not None and masked(raw)
+        line = parse(raw) if not is_masked or k > 1 else None
+        if k > 1 and line is not None:
+            chrom, pos = line[0], int(line[1])
+            while pending and (pending[0][0] != chrom or pos - pending[0][1] > k):
+                yield pending.popleft()[2:]
+            while recent and (recent[0][0] != chrom or pos - recent[0][1] > k + 1):
+                recent.popleft()
+            value = event(raw, line)
+            if value:
+                for w in pending:
+                    w[3] = value if w[3] is None else combine(w[3], value)
+                recent.append((chrom, pos, value))
+        if is_masked:
+            n_masked += 1
+            continue
+        n_lines += 1
+        ok2 = clean(line)
+        if ok0 and ok1 and ok2 and l0[0] == l1[0] == line[0]:
+            buf = [l0, l1, line]
+            if not int(l0[1]) + 1 == int(l1[1]) == int(line[1]) - 1:     # consecutive; same chromosome checked above
+                n_gaps += 1
+            elif k == 1:
+                yield buf, None
+            else:
+                chrom, mid, near = l1[0], int(l1[1]), None
+                for c, p, v in recent:
+                    if c == chrom and abs(p - mid) <= k:
+                        near = v if near is None else combine(near, v)
+                pending.append([chrom, mid, buf, near])
+        l0, l1, ok0, ok1 = l1, line, ok1, ok2
+    while pending:
+        yield pending.popleft()[2:]
+    if stats is not None:
+        stats['lines'] += n_lines
+        stats['masked'] += n_masked
+        stats['non_consecutive'] += n_gaps
 
 
 def extract_context(lines):
@@ -163,23 +231,16 @@ def detect_mutation_triplet(triplets):
     return t1_mut, t2_mut, t1_3mer, t2_3mer, site_class
 
 
-def _drop_masked(line_iter, ref_mask, masked=None):
-    """Yield only pileup lines whose (chrom, 1-based pos) is not a reference repeat.
-    Dropping a masked line removes it from the 3-position window entirely, so no call
-    is made at OR adjacent to a repeat (the `consecutive` check breaks over the gap).
-    `masked`, when given, is a one-element list that accumulates the drop count."""
-    for line in line_iter:
+def _masked_line(ref_mask):
+    """-> raw pileup line -> True if its (chrom, 1-based pos) is a reference repeat. """
+    def masked(line):
         t1 = line.find('\t')
         t2 = line.find('\t', t1 + 1)
-        if t1 < 0 or t2 < 0:
-            continue
-        if not ref_mask.contains(line[:t1], int(line[t1 + 1:t2])):
-            yield line
-        elif masked is not None:
-            masked[0] += 1
+        return t1 >= 0 and t2 >= 0 and ref_mask.contains(line[:t1], int(line[t1 + 1:t2]))
+    return masked
 
 
-def scan_pileup(line_iter, on_mut1=None, on_mut2=None, ref_mask=None):
+def scan_pileup(line_iter, on_mut1=None, on_mut2=None, ref_mask=None, indel_window=1):
     """Single linear scan over pileup lines with a 3-position sliding window.
 
     Returns (mut1, mut2, triplet1, triplet2, classes) count dicts. For each detected
@@ -188,7 +249,9 @@ def scan_pileup(line_iter, on_mut1=None, on_mut2=None, ref_mask=None):
     them. This is the single source of truth for the scan: both the serial
     MutationExtractor and the parallel driver call it, so their results cannot
     diverge. When `ref_mask` is given, positions inside reference repeats are
-    dropped before the scan so no call is made there.
+    dropped before the scan so no call is made there. With indel_window k > 1,
+    windows whose middle is within k bp of an indel in any read are left out too 
+    (k = 1: only the window's own three bases, as always).
     """
     mut1 = defaultdict(int)
     mut2 = defaultdict(int)
@@ -197,66 +260,48 @@ def scan_pileup(line_iter, on_mut1=None, on_mut2=None, ref_mask=None):
     classes = defaultdict(int)
     ref_diff = defaultdict(int)
     dropped = defaultdict(int)
-    masked = [0]
-    n_lines = 0
-    n_nonconsecutive = 0
+    stats = defaultdict(int)
+    n_near = 0
 
-    def finish(n_lines):
-        summary = {
-            'pileup_lines': dict(dropped, lines_after_mask=n_lines, lines_masked=masked[0]),
-            'candidate_windows': {'non_consecutive': n_nonconsecutive},
-            'site_classes': dict(classes),
-        }
-        return mut1, mut2, trip1, trip2, summary, ref_diff
+    masked = _masked_line(ref_mask) if ref_mask else None
+    event = lambda raw, line: (has_indel(line[N_READS_1_IDX], line[NUC_1_IDX])
+                               or has_indel(line[N_READS_2_IDX], line[NUC_2_IDX]))
+    for line_fields, near in scan_windows(line_iter, parse_line, lambda line: quality_check(line, dropped),
+                                          event, indel_window, masked, stats=stats):
+        if near:
+            n_near += 1
+            continue
+        triplets = extract_context(line_fields)
+        m1, m2, t1, t2, site_class = detect_mutation_triplet(triplets)
+        classes[site_class] += 1
+        if site_class == 'ref_differs':
+            sis = triplets[TAXA1_IDX][CUR_IDX]
+            ref_diff[f"{triplets[REF_IDX][PREV_IDX]}[{sis}>{triplets[REF_IDX][CUR_IDX]}]{triplets[REF_IDX][NEXT_IDX]}"] += 1
+        chrom = line_fields[1][CHR_IDX]
+        pos = int(line_fields[1][POSITION_IDX])
 
-    if ref_mask:
-        line_iter = _drop_masked(line_iter, ref_mask, masked)
-    it = iter(line_iter)
-    first = next(it, None)
-    if first is None:
-        return finish(0)
-    parsed_first = parse_line(first)
-    qc_first = quality_check(parsed_first, dropped)
-    second = next(it, None)
-    if second is None:
-        return finish(1)
+        if m1:
+            mut1[m1] += 1
+            if on_mut1:
+                on_mut1(chrom, pos, m1)
+        if m2:
+            mut2[m2] += 1
+            if on_mut2:
+                on_mut2(chrom, pos, m2)
+        if t1:
+            trip1[t1] += 1
+        if t2:
+            trip2[t2] += 1
 
-    line_fields = [None, parsed_first, parse_line(second)]
-    qc_flags = [False, qc_first, quality_check(line_fields[2], dropped)]
-    n_lines = 2
-
-    for line in it:
-        n_lines += 1
-        line_fields = [line_fields[1], line_fields[2], parse_line(line)]
-        qc_flags = [qc_flags[1], qc_flags[2], quality_check(line_fields[2], dropped)]
-
-        if all(qc_flags) and line_fields[0][CHR_IDX] == line_fields[1][CHR_IDX] == line_fields[2][CHR_IDX]:
-            if not consecutive(*line_fields):
-                n_nonconsecutive += 1
-            else:
-                triplets = extract_context(line_fields)
-                m1, m2, t1, t2, site_class = detect_mutation_triplet(triplets)
-                classes[site_class] += 1
-                if site_class == 'ref_differs':
-                    sis = triplets[TAXA1_IDX][CUR_IDX]
-                    ref_diff[f"{triplets[REF_IDX][PREV_IDX]}[{sis}>{triplets[REF_IDX][CUR_IDX]}]{triplets[REF_IDX][NEXT_IDX]}"] += 1
-                chrom = line_fields[1][CHR_IDX]
-                pos = int(line_fields[1][POSITION_IDX])
-
-                if m1:
-                    mut1[m1] += 1
-                    if on_mut1:
-                        on_mut1(chrom, pos, m1)
-                if m2:
-                    mut2[m2] += 1
-                    if on_mut2:
-                        on_mut2(chrom, pos, m2)
-                if t1:
-                    trip1[t1] += 1
-                if t2:
-                    trip2[t2] += 1
-
-    return finish(n_lines)
+    windows = {'non_consecutive': stats['non_consecutive']}
+    if indel_window > 1:
+        windows['near_indel'] = n_near
+    summary = {
+        'pileup_lines': dict(dropped, lines_after_mask=stats['lines'], lines_masked=stats['masked']),
+        'candidate_windows': windows,
+        'site_classes': dict(classes),
+    }
+    return mut1, mut2, trip1, trip2, summary, ref_diff
 
 
 def _merge_summary(dst, src):
@@ -286,11 +331,12 @@ def _write_extractor_outputs(mut1, mut2, trip1, trip2, out_json1, out_json2, tri
 
 class MutationExtractor:
     def __init__(self, reference, taxon1, taxon2, pileup_file, mutation_output_dir, triplet_output_dir,
-                 no_full_mutations=False, no_cache=False, verbose=True, ref_mask=None):
+                 no_full_mutations=False, no_cache=False, verbose=True, ref_mask=None, indel_window=1):
         self.reference = reference
         self.taxon1 = taxon1
         self.taxon2 = taxon2
         self.pileup_file = pileup_file
+        self.indel_window = indel_window
         self.mutation_output_dir = mutation_output_dir
         self.triplet_output_dir = triplet_output_dir
         self.no_full_mutations = no_full_mutations
@@ -333,7 +379,7 @@ class MutationExtractor:
 
         with gzip.open(self.pileup_file, 'rt') as f:
             species_mut1, species_mut2, species_triplet1, species_triplet2, summary, ref_diff = scan_pileup(
-                f, on_mut1, on_mut2, ref_mask=self.ref_mask)
+                f, on_mut1, on_mut2, ref_mask=self.ref_mask, indel_window=self.indel_window)
 
         if csv1:
             csv1.close()
@@ -378,7 +424,7 @@ def _chroms_with_reads(bams):
     return have
 
 
-def _extract_region(chrom, ref_fasta, bams, no_full_mutations, ref_mask=None):
+def _extract_region(chrom, ref_fasta, bams, no_full_mutations, ref_mask=None, indel_window=1):
     """Worker: generate this chromosome's pileup via index-based
     `samtools mpileup -r <chrom>` (so no worker ever streams the whole file),
     then scan it with the shared scan_pileup. The mpileup options match
@@ -397,7 +443,8 @@ def _extract_region(chrom, ref_fasta, bams, no_full_mutations, ref_mask=None):
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf)
         try:
             with TextIOWrapper(proc.stdout) as stream:
-                mut1, mut2, trip1, trip2, summary, ref_diff = scan_pileup(stream, on1, on2, ref_mask=ref_mask)
+                mut1, mut2, trip1, trip2, summary, ref_diff = scan_pileup(stream, on1, on2, ref_mask=ref_mask,
+                                                                          indel_window=indel_window)
         finally:
             proc.wait()
         if proc.returncode != 0:
@@ -416,8 +463,9 @@ class ParallelMutationExtractor:
     chromosomes that actually carry reads are processed."""
 
     def __init__(self, reference, taxon1, taxon2, ref_fasta, bams, mutation_output_dir, triplet_output_dir,
-                 fai_path, cores, no_full_mutations=False, no_cache=False, verbose=True, ref_mask=None):
+                 fai_path, cores, no_full_mutations=False, no_cache=False, verbose=True, ref_mask=None, indel_window=1):
         self.reference = reference
+        self.indel_window = indel_window
         self.taxon1 = taxon1
         self.taxon2 = taxon2
         self.ref_fasta = ref_fasta
@@ -462,7 +510,7 @@ class ParallelMutationExtractor:
         # ship each worker only its chromosome's slice of the mask, not the whole
         # genome's (a genome-scale mask is ~10^6 intervals -> costly to pickle N times).
         args = [(c, self.ref_fasta, self.bams, self.no_full_mutations,
-                 self.ref_mask.for_contig(c) if self.ref_mask else None) for c in tasks]
+                 self.ref_mask.for_contig(c) if self.ref_mask else None, self.indel_window) for c in tasks]
         if not args:
             results = []
         elif n_workers <= 1:

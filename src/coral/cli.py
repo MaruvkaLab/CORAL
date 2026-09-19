@@ -40,6 +40,10 @@ def main():
                              "(default, library-free) or repeatmasker")
     trio.add_argument("--repeat-species", dest="repeat_species", default=None, metavar="CLADE",
                         help="RepeatMasker library clade (e.g. 'drosophila'); only with --repeat-mask repeatmasker")
+    trio.add_argument("--indel-window", type=int, default=1, metavar="K",
+                      help="A window is not called if its middle base is within K bp of an indel in any kept read. "
+                             "1 (default): only the window's own three bases"
+                           " (with --annotate, K > 1 is recorded as a flag)")
     trio.add_argument("--annotate", action="store_true",
                         help="Evaluation mode: keep all reads with MAPQ >= --low-mapq, tag each with its "
                              "best overlapping neighbour, and write every call with the MAPQ threshold "
@@ -65,6 +69,9 @@ def main():
     multi.add_argument("--run-id", default=None)
     multi.add_argument("--mapq", type=int, default=60)
     multi.add_argument("--low-mapq", type=int, default=1)
+    multi.add_argument("--indel-window", type=int, default=1, metavar="K",
+                       help="A window is not called if its middle base is within K bp of an indel "
+                             "in any kept read. 1 (default): only the window's own three bases")
     multi.add_argument("--cores", type=int, default=None,
                        help="Number of cores to use. Default: use all available cores. "
                        "--cores 1 runs everything serially.")
@@ -122,6 +129,7 @@ def main():
                 repeat_masker=args.repeat_mask or "windowmasker",
                 repeat_species=args.repeat_species,
                 annotate=args.annotate,
+                indel_window=args.indel_window,
             )
             pipeline.run()
 
@@ -146,6 +154,7 @@ def main():
                 scan_jobs=args.scan_jobs,
                 fitch_jobs=args.fitch_jobs,
                 max_memory_mb=args.max_memory_mb,
+                indel_window=args.indel_window,
             )
             pipeline.run()
 

@@ -5,7 +5,7 @@ import gzip
 from collections import defaultdict
 import pandas as pd
 from .multiple_species_utils import annotate_tree_with_indices, save_annotated_tree
-from .mutation_extractor_manager import MutationNormalizer, clean_bases, consecutive, sample_problem
+from .mutation_extractor_manager import MutationNormalizer, clean_bases, consecutive, has_indel, sample_problem, scan_windows
 from .plot_utils import MutationSpectraPlotter
 from .utils import log
 
@@ -34,8 +34,9 @@ class ParsedLine(list):
 class MultipleSpeciesMutationExtractor:
     def __init__(self, pileup_file, output_dir, n_species, tree=None, species_list=None, mapping=None, no_cache=False, verbose=False,
                  ref_fasta=None, bams=None, fai_path=None, cores=1, scan_jobs=None, max_memory_mb=None,
-                 fitch_jobs=None, parallel_fitch=False):
+                 fitch_jobs=None, parallel_fitch=False, indel_window=1):
         self.pileup_file = pileup_file
+        self.indel_window = indel_window
         self.output_dir = output_dir
         self.n_species = n_species
         self.tree = tree
@@ -170,6 +171,16 @@ class MultipleSpeciesMutationExtractor:
     def _consecutive(self, *lines):
         return consecutive(*lines)
 
+    def _indel_event(self, raw, fields):
+        return any(has_indel(depth, bases) for depth, bases in fields[3:])
+
+    def _windows(self, lines):
+        """The shared 3-line windows over pileup text lines, without those near an indel."""
+        for window, near in scan_windows(lines, self._parse_line, self._quality_check, self._indel_event,
+                                         self.indel_window):
+            if not near:
+                yield window
+
     def extract(self):
         csv_path = os.path.join(self.output_dir, "matching_bases.csv.gz")
         header = ["chromosome", "position", "left", "right"] + [f"taxa{k}" for k in self.mapping if isinstance(k, int)]
@@ -222,18 +233,12 @@ class MultipleSpeciesMutationExtractor:
                 writer.writerow(header)
 
                 with gzip.open(self.pileup_file, 'rt') as infile:
-                    buffer = [None, self._parse_line(infile.readline()), self._parse_line(infile.readline())]
-                    qc_flags = [False, self._quality_check(buffer[1]), self._quality_check(buffer[2])]
-
-                    for line in infile:
-                        buffer = [buffer[1], buffer[2], self._parse_line(line)]
-                        qc_flags = [qc_flags[1], qc_flags[2], self._quality_check(buffer[2])]
-                        if all(qc_flags) and self._consecutive(*buffer):
-                            result, triplet = self._detect_site(buffer)
-                            if triplet is not None:
-                                triplet_counts[triplet] += 1
-                            if result is not None:
-                                writer.writerow(result)
+                    for buffer in self._windows(infile):
+                        result, triplet = self._detect_site(buffer)
+                        if triplet is not None:
+                            triplet_counts[triplet] += 1
+                        if result is not None:
+                            writer.writerow(result)
             os.replace(tmp_path, csv_path)
         except BaseException:
             if os.path.exists(tmp_path):
