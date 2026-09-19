@@ -82,7 +82,22 @@ def parse_line(line):
 
 
 def all_same(seq):
-    return len(seq) > 0 and all(ch == seq[0] for ch in seq)
+    return len(seq) > 0 and seq.count(seq[0]) == len(seq)
+
+
+def sample_problem(depth, bases, cleaned):
+    """Why one sample's reads can't be used at a pileup position, or None. `cleaned` is clean_bases(bases).
+    Shared by the two-taxa and the multi-species scans."""
+    bases = re.sub(r'\^.', '', bases)   # a read start is '^' + its MAPQ as a character, which can be * or +
+    if '*' in bases:
+        return 'deletion'
+    if '+' in bases:
+        return 'insertion'
+    if int(depth) < MIN_DEPTH:
+        return 'no_depth'
+    if not all_same(cleaned.replace(',', '.').lower()):
+        return 'reads_disagree'
+    return None
 
 
 def quality_check(line, dropped=None):
@@ -91,28 +106,14 @@ def quality_check(line, dropped=None):
             dropped['unparsed'] += 1
         return False
     fields = line.fields
-    # a read start is '^' + its MAPQ as a character, which can be * or +
-    bases1 = re.sub(r'\^.', '', fields[NUC_1_IDX])
-    bases2 = re.sub(r'\^.', '', fields[NUC_2_IDX])
-    if '*' in bases1 or '*' in bases2: # deletions
-        if dropped is not None:
-            dropped['deletion'] += 1
-        return False
-    if '+' in bases1 or '+' in bases2: # insertions
-        if dropped is not None:
-            dropped['insertion'] += 1
-        return False
-    if int(fields[N_READS_1_IDX]) < MIN_DEPTH or int(fields[N_READS_2_IDX]) < MIN_DEPTH:
-        if dropped is not None:
-            dropped['no_depth'] += 1
-        return False
-    nuc1 = line.clean(NUC_1_IDX).replace(',', '.').lower()
-    nuc2 = line.clean(NUC_2_IDX).replace(',', '.').lower()
-    if all_same(nuc1) and all_same(nuc2):
-        return True
-    if dropped is not None:
-        dropped['reads_disagree'] += 1
-    return False
+    problems = {sample_problem(fields[n], fields[b], line.clean(b))
+                for n, b in ((N_READS_1_IDX, NUC_1_IDX), (N_READS_2_IDX, NUC_2_IDX))}
+    for reason in ('deletion', 'insertion', 'no_depth', 'reads_disagree'):   # the first that applies is counted
+        if reason in problems:
+            if dropped is not None:
+                dropped[reason] += 1
+            return False
+    return True
 
 
 def consecutive(*lines):

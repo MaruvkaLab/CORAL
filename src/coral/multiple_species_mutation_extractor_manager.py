@@ -5,43 +5,9 @@ import gzip
 from collections import defaultdict
 import pandas as pd
 from .multiple_species_utils import annotate_tree_with_indices, save_annotated_tree
-from .mutation_extractor_manager import MutationNormalizer
+from .mutation_extractor_manager import MutationNormalizer, clean_bases, consecutive, sample_problem
 from .plot_utils import MutationSpectraPlotter
 from .utils import log
-import re
-
-MIN_DEPTH = 1  # Minimum depth threshold for quality check
-
-# Matches read-start (^ + mapQ char), read-end ($), or an indel marker (+N / -N).
-# Digits are captured so the N following indel bases can be skipped in one pass.
-_CLEAN_RE = re.compile(r'\^.|\$|[+-](\d*)')
-
-
-def clean_bases(s):
-    """Strip read-start/end markers and indel notation from an mpileup bases field.
-
-    Fast path: every removable marker (^x, $, +N…, -N…) contains at least one of
-    ^, $, +, or -. When none are present—the overwhelmingly common case for
-    CORAL's shallow pileups—the regex would return s unchanged, so we skip it.
-    This is byte-for-byte identical to the regex path while avoiding the regex
-    call and list construction.
-    """
-    if '^' not in s and '$' not in s and '+' not in s and '-' not in s:
-        return s
-    out = []
-    pos = 0
-    for m in _CLEAN_RE.finditer(s):
-        if m.start() < pos:
-            continue  # falls inside a just-skipped indel run; can't happen in valid pileup syntax
-        out.append(s[pos:m.start()])
-        digits = m.group(1)
-        if digits is not None:
-            pos = m.end() + (int(digits) if digits else 0)
-        else:
-            pos = m.end()
-    out.append(s[pos:])
-    return ''.join(out)
-
 
 class ParsedLine(list):
     """Parsed pileup row: [chrom, pos, ref, (depth, bases), ...].
@@ -97,11 +63,6 @@ class MultipleSpeciesMutationExtractor:
         self.csv_dir = os.path.join(self.output_dir, "Mutations")
         self.triplet_counts = None  # trinucleotide opportunities, from the scan
 
-    def _all_same(self, seq):
-        # count() runs its comparison loop in C; a generator + all() pays
-        # per-element Python-level overhead for what is otherwise a tight scan.
-        return len(seq) > 0 and seq.count(seq[0]) == len(seq)
-
     def _parse_line(self, line):
         parts = line.strip().split('\t')
         if len(parts) < self.n_species * 3:
@@ -114,18 +75,8 @@ class MultipleSpeciesMutationExtractor:
     def _quality_check(self, fields):
         if not fields:
             return False
-        samples = fields[3:]
-        for i, (depth, bases) in enumerate(samples):
-            if '*' in bases: # deletions
-                return False
-            if '+' in bases: # insertions
-                return False
-            if int(depth) < MIN_DEPTH:
-                return False
-            cleaned = fields.clean_sample(i).replace(',', '.').lower()
-            if not self._all_same(cleaned):
-                return False
-        return True
+        return all(sample_problem(depth, bases, fields.clean_sample(i)) is None
+                   for i, (depth, bases) in enumerate(fields[3:]))
 
     def _detect_site(self, buffer):
         """One look at the 3-line window -> (mutation_row, triplet_context).
@@ -217,10 +168,7 @@ class MultipleSpeciesMutationExtractor:
         return mutation_dict, 1
 
     def _consecutive(self, *lines):
-        chrom = lines[0][0]                       # index 0 = chrom
-        positions = [int(f[1]) for f in lines]    # index 1 = pos
-        return (all(f[0] == chrom for f in lines)
-                and all(positions[i] + 1 == positions[i + 1] for i in range(len(positions) - 1)))
+        return consecutive(*lines)
 
     def extract(self):
         csv_path = os.path.join(self.output_dir, "matching_bases.csv.gz")
