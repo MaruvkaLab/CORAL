@@ -26,7 +26,7 @@ CORAL creates a self-contained output directory for each run. The directory stru
 
 The `run_id` determines the output directory name and is used in many file names.
 
-### For `coral run_single`:
+### For `coral run_trio`:
 
 **Default run_id:**
 ```

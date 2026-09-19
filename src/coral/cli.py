@@ -9,38 +9,38 @@ def main():
     subparsers = parser.add_subparsers(dest="subcmd")
 
     # === Single-Pipeline ===
-    single = subparsers.add_parser("run_single", help="Run 3-species pipeline (outgroup + 2)")
-    single.add_argument("--outgroup", nargs=2, metavar=("NAME", "ACCESSION"), required=True)
-    single.add_argument("--species", nargs=4, metavar=("NAME1", "ACC1", "NAME2", "ACC2"), required=True)
-    single.add_argument("--output", required=True)
-    single.add_argument("--no-cache", action="store_true")
-    verbose_group = single.add_mutually_exclusive_group()
+    trio = subparsers.add_parser("run_trio", aliases=["run_single"], help="Run 3-species pipeline (outgroup + 2)")
+    trio.add_argument("--outgroup", nargs=2, metavar=("NAME", "ACCESSION"), required=True)
+    trio.add_argument("--species", nargs=4, metavar=("NAME1", "ACC1", "NAME2", "ACC2"), required=True)
+    trio.add_argument("--output", required=True)
+    trio.add_argument("--no-cache", action="store_true")
+    verbose_group = trio.add_mutually_exclusive_group()
     verbose_group.add_argument("--verbose", dest="verbose", action="store_true", help="Enable verbose logging (default: enabled)")
     verbose_group.add_argument("--quiet", dest="verbose", action="store_false", help="Disable verbose logging")
-    single.set_defaults(verbose=True)
-    single.add_argument("--suffix", default=None)
-    single.add_argument("--aligner-name", default="bwa-mem2")
-    single.add_argument("--aligner-cmd", default=None)
-    single.add_argument("--streamed", action="store_true")
-    single.add_argument("--mapq", type=int, default=60)
-    single.add_argument("--low-mapq", type=int, default=1)
-    continuity_group = single.add_mutually_exclusive_group()
+    trio.set_defaults(verbose=True)
+    trio.add_argument("--suffix", default=None)
+    trio.add_argument("--aligner-name", default="bwa-mem2")
+    trio.add_argument("--aligner-cmd", default=None)
+    trio.add_argument("--streamed", action="store_true")
+    trio.add_argument("--mapq", type=int, default=60)
+    trio.add_argument("--low-mapq", type=int, default=1)
+    continuity_group = trio.add_mutually_exclusive_group()
     continuity_group.add_argument("--continuity", action="store_true", default=True, help="Enable continuity mode (default)")
     continuity_group.add_argument("--no-continuity", dest="continuity", action="store_false", help="Disable continuity mode")
-    single.add_argument("--cores", type=int, default=None)
-    single.add_argument("--divergence-time", type=int, default=None)
-    single.add_argument("--no-plots", dest="plots", action="store_false", default=True,
+    trio.add_argument("--cores", type=int, default=None)
+    trio.add_argument("--divergence-time", type=int, default=None)
+    trio.add_argument("--no-plots", dest="plots", action="store_false", default=True,
                         help="Skip the plotting stage (saves time and a lot of small PNG files)")
-    single.add_argument("--five-mer", dest="five_mer", action="store_true",
+    trio.add_argument("--five-mer", dest="five_mer", action="store_true",
                         help="Also extract 5-mer mutation contexts (adds a full pileup pass; off by default)")
-    single.add_argument("--repeat-mask", dest="repeat_mask", nargs="?", const="windowmasker",
+    trio.add_argument("--repeat-mask", dest="repeat_mask", nargs="?", const="windowmasker",
                         default=None, choices=["windowmasker", "repeatmasker"], metavar="TOOL",
                         help="Mask repeats: skip pseudo-reads from species repeats and calls at "
                              "reference repeat positions. Off unless given; TOOL is windowmasker "
                              "(default, library-free) or repeatmasker")
-    single.add_argument("--repeat-species", dest="repeat_species", default=None, metavar="CLADE",
+    trio.add_argument("--repeat-species", dest="repeat_species", default=None, metavar="CLADE",
                         help="RepeatMasker library clade (e.g. 'drosophila'); only with --repeat-mask repeatmasker")
-    single.add_argument("--annotate", action="store_true",
+    trio.add_argument("--annotate", action="store_true",
                         help="Evaluation mode: keep all reads with MAPQ >= --low-mapq, tag each with its "
                              "best overlapping neighbour, and write every call with the MAPQ threshold "
                              "range (with and without continuity) at which it is made, to Annotated/. "
@@ -100,7 +100,7 @@ def main():
     args = parser.parse_args()
 
     try:
-        if args.subcmd == "run_single":
+        if args.subcmd in ("run_trio", "run_single"):
             pipeline = MutationExtractionPipeline(
                 species_list=[(args.species[0], args.species[1]), (args.species[2], args.species[3])],
                 outgroup=(args.outgroup[0], args.outgroup[1]),

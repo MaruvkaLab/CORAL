@@ -265,7 +265,7 @@ class MultipleSpeciesMutationExtractor:
         spectra_plotter = MutationSpectraPlotter()
         os.makedirs(self.plots_dir, exist_ok=True)
         os.makedirs(self.csv_dir, exist_ok=True)
-        # run_single's normaliser, so both pipelines fold and scale identically.
+        # run_trio's normaliser, so both pipelines fold and scale identically.
         # It owns Tables/ and creates it.
         normalizer = MutationNormalizer(self.output_dir, verbose=self.verbose)
         tables_dir = normalizer.output_dir

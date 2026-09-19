@@ -85,7 +85,7 @@ where a curated library exists for the clade (`--repeat-species`).
 ### Three-taxon pipeline (outgroup + two ingroups)
 
 ```bash
-coral run_single \
+coral run_trio \
   --outgroup Saccharomyces_mikatae_IFO_1815 GCF_947241705.1 \
   --species Saccharomyces_paradoxus GCF_002079055.1 \
             Saccharomyces_cerevisiae_S288C GCF_000146045.2 \
