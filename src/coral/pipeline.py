@@ -281,13 +281,15 @@ class MutationExtractionPipeline:
                     mapq=self.params.get("mapq", 60),
                     low_mapq=self.params.get("low_mapq", 1),
                     max_sort_mem=self.params.get("max_samtools_mem", None),
-                    continuity=self.params.get("continuity", True)
+                    continuity=self.params.get("continuity", True),
+                    continuity_run=self.params.get("continuity_run", 2)
                 )
             else:
                 aligner.align_disk_cached(
                     mapq=self.params.get("mapq", 60),
                     low_mapq=self.params.get("low_mapq", 1),
-                    continuity=self.params.get("continuity", True)
+                    continuity=self.params.get("continuity", True),
+                    continuity_run=self.params.get("continuity_run", 2)
                 )
             self.align_times[genome.name] = round(time.time() - t0, 2)
             self.alignments.append(aligner)
@@ -678,13 +680,15 @@ class MultiSpeciesMutationPipeline:
                     mapq=self.params.get("mapq", 60),
                     low_mapq=self.params.get("low_mapq", 1),
                     max_sort_mem=self.params.get("max_samtools_mem", None),
-                    continuity=self.params.get("continuity", True)
+                    continuity=self.params.get("continuity", True),
+                    continuity_run=self.params.get("continuity_run", 2)
                 )
             else:
                 aligner.align_disk_cached(
                     mapq=self.params.get("mapq", 60),
                     low_mapq=self.params.get("low_mapq", 1),
-                    continuity=self.params.get("continuity", True)
+                    continuity=self.params.get("continuity", True),
+                    continuity_run=self.params.get("continuity_run", 2)
                 )
 
             self.alignments.append(aligner)
@@ -713,6 +717,7 @@ class MultiSpeciesMutationPipeline:
             "mapq": self.params.get("mapq", 60),
             "low_mapq": self.params.get("low_mapq", 1),
             "continuity": self.params.get("continuity", True),
+            "continuity_run": self.params.get("continuity_run", 2),
         }
         if streamed:
             align_kwargs["max_sort_mem"] = self.params.get("max_samtools_mem", None)

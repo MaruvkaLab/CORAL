@@ -27,6 +27,9 @@ def main():
     continuity_group = trio.add_mutually_exclusive_group()
     continuity_group.add_argument("--continuity", action="store_true", default=True, help="Enable continuity mode (default)")
     continuity_group.add_argument("--no-continuity", dest="continuity", action="store_false", help="Disable continuity mode")
+    trio.add_argument("--continuity-run", type=int, default=2, metavar="N",
+                      help="A read below --mapq is rescued if it is part of a run of at least N consecutive "
+                             "fragments, each overlapping the next. 2 (default): an overlapping neighbour")
     trio.add_argument("--cores", type=int, default=None)
     trio.add_argument("--divergence-time", type=int, default=None)
     trio.add_argument("--no-plots", dest="plots", action="store_false", default=True,
@@ -66,6 +69,9 @@ def main():
     continuity_group_multi = multi.add_mutually_exclusive_group()
     continuity_group_multi.add_argument("--continuity", action="store_true", default=True, help="Enable continuity mode (default)")
     continuity_group_multi.add_argument("--no-continuity", dest="continuity", action="store_false", help="Disable continuity mode")
+    multi.add_argument("--continuity-run", type=int, default=2, metavar="N",
+                       help="A read below --mapq is rescued if it is part of a run of at least N consecutive "
+                             "fragments, each overlapping the next. 2 (default): an overlapping neighbour")
     multi.add_argument("--run-id", default=None)
     multi.add_argument("--mapq", type=int, default=60)
     multi.add_argument("--low-mapq", type=int, default=1)
@@ -122,6 +128,7 @@ def main():
                 low_mapq=args.low_mapq,
                 cores=args.cores,
                 continuity=args.continuity,
+                continuity_run=args.continuity_run,
                 divergence_time=args.divergence_time,
                 five_mer=args.five_mer,
                 plots=args.plots,
@@ -149,6 +156,7 @@ def main():
                 low_mapq=args.low_mapq,
                 cores=args.cores,
                 continuity=args.continuity,
+                continuity_run=args.continuity_run,
                 no_parallel=args.no_parallel,
                 align_jobs=args.align_jobs,
                 scan_jobs=args.scan_jobs,

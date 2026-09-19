@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import defaultdict, deque
 from io import TextIOWrapper
 import os
 import subprocess
@@ -118,7 +118,12 @@ def with_continuity_filter_sam(
     hist_name: str = None,
     verbose: bool = True,
     log_path: Optional[str] = None,
+    continuity_run: int = 2,
 ):
+    # A read below mapq_threshold is kept if it is part of a run of at least continuity_run
+    # consecutive fragments, each overlapping the next on the reference (2: a neighbour overlaps it).
+    if continuity_run < 2:
+        raise ValueError("continuity_run must be at least 2")
     total_reads = 0
     kept_reads = 0
     kept_high_mapq = 0
@@ -164,10 +169,10 @@ def with_continuity_filter_sam(
             log(msg, verbose)
             log_to_file(log_path, msg)
 
-    prev_reads = []
+    before = deque(maxlen=continuity_run - 1)
+    after = deque()
     cur_reads = []
-    next_reads = []
-    next_read_name = None
+    cur_read_name = None
     skip_contigs = {'Un', 'random', 'alt', 'fix', 'hap'}
 
     bamfile = pysam.AlignmentFile(input_stream, "rb")
@@ -177,8 +182,17 @@ def with_continuity_filter_sam(
         bamfile.close()
         raise
 
-    def emit(reads, before, after):
+    def run_length(read, fragments):
+        chain = [[read]] + fragments
+        run = [1] * len(chain[-1])
+        for j in range(len(chain) - 2, -1, -1):
+            run = [1 + max([n for other, n in zip(chain[j + 1], run) if overlaps(r, [other])], default=0)
+                   for r in chain[j]]
+        return run[0]
+
+    def emit_first():
         nonlocal kept_reads, kept_high_mapq, kept_rescued, filtered_disjoint, filtered_chrom
+        reads = after.popleft()
         for read in reads:
             mapq_values[read.mapping_quality] += 1
             chrom = read.reference_name
@@ -189,12 +203,15 @@ def with_continuity_filter_sam(
                 output_sam.write(read)
                 kept_reads += 1
                 kept_high_mapq += 1
-            elif overlaps(read, before) or overlaps(read, after):
+                continue
+            right = run_length(read, list(after))
+            if right >= continuity_run or run_length(read, list(reversed(before))) + right - 1 >= continuity_run:
                 output_sam.write(read)
                 kept_reads += 1
                 kept_rescued += 1
             else:
                 filtered_disjoint += 1
+        before.append(reads)
 
     try:
         for read in bamfile.fetch():
@@ -205,15 +222,20 @@ def with_continuity_filter_sam(
             if read.mapping_quality < low_mapq:
                 filtered_mapq += 1
                 continue
-            if next_read_name == read.query_name:
-                next_reads.append(read)
+            if cur_read_name == read.query_name:
+                cur_reads.append(read)
             else:
-                emit(cur_reads, prev_reads, next_reads)
-                prev_reads, cur_reads, next_reads = cur_reads, next_reads, [read]
-                next_read_name = read.query_name
+                if cur_reads:
+                    after.append(cur_reads)
+                    if len(after) == continuity_run:
+                        emit_first()
+                cur_reads = [read]
+                cur_read_name = read.query_name
 
-        emit(cur_reads, prev_reads, next_reads)
-        emit(next_reads, cur_reads, [])
+        if cur_reads:
+            after.append(cur_reads)
+        while after:
+            emit_first()
     finally:
         bamfile.close()
         output_sam.close()
@@ -376,7 +398,7 @@ class Aligner:
             if r not in self.aligner_cmd_template:
                 raise ValueError(f"--aligner-cmd must include placeholders: {', '.join(required)}")
 
-    def align_streamed(self, mapq=60, low_mapq = 1, max_sort_mem=None, continuity = True):
+    def align_streamed(self, mapq=60, low_mapq = 1, max_sort_mem=None, continuity = True, continuity_run=2):
         if os.path.exists(self.final_bam) and os.path.exists(self.final_bam + '.bai') and not self.no_cache:
             log(f"Streamed alignment already exists: {self.final_bam}", self.verbose)
             return self.final_bam
@@ -415,7 +437,8 @@ class Aligner:
                 mapq_hist_folder=self.plots_dir,
                 hist_name=self.hist_name,
                 verbose=self.verbose,
-                log_path=self.log_path
+                log_path=self.log_path,
+                continuity_run=continuity_run
                 )
             else:
                 self.filter_stats = filter_sam(
@@ -433,7 +456,7 @@ class Aligner:
         log(f"Finished (streamed): {self.final_bam}", self.verbose)
         return self.final_bam
 
-    def align_disk_cached(self, mapq=60, low_mapq=1, continuity = True):
+    def align_disk_cached(self, mapq=60, low_mapq=1, continuity = True, continuity_run=2):
         # Step 1: Align and sort raw.bam
         if not os.path.exists(self.raw_bam) or self.no_cache:
             cmd = self.aligner_cmd_template \
@@ -476,7 +499,8 @@ class Aligner:
                     mapq_hist_folder=self.plots_dir,
                     hist_name=self.hist_name,
                     verbose=self.verbose,
-                    log_path=self.log_path
+                    log_path=self.log_path,
+                    continuity_run=continuity_run
                 )
             else:
                 self.filter_stats = filter_sam(
