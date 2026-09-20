@@ -18,9 +18,10 @@ DEFAULT_OFFSET = 75
 
 
 def has_bam_index(bam_path):
-    """samtools index writes a .bai, or a .csi with -c -- which is what the
-    disk-cached path uses, since .bai cannot address contigs over 512 Mb. Either
-    one lets pysam and `mpileup -r` seek, so either satisfies a cache check."""
+    """Both alignment paths index with -c, so they write a .csi: a .bai cannot
+    address a contig over 512 Mb. A BAM from an earlier run may still carry a
+    .bai, and either lets pysam and `mpileup -r` seek, so either satisfies a
+    cache check."""
     return os.path.exists(bam_path + '.bai') or os.path.exists(bam_path + '.csi')
 
 
@@ -459,7 +460,7 @@ class Aligner:
                 )
         sort_proc.stdin.close()
         sort_proc.wait()
-        run_cmd(["samtools", "index", self.final_bam])
+        run_cmd(["samtools", "index", '-c', self.final_bam])
         log(f"Finished (streamed): {self.final_bam}", self.verbose)
         return self.final_bam
 
@@ -526,7 +527,6 @@ class Aligner:
 
         # Step 3: Index final.bam
         if not has_bam_index(self.final_bam) or self.no_cache:
-            # run_cmd(["samtools", "index", self.final_bam])
             run_cmd(["samtools", "index", '-c', self.final_bam])
 
         log(f"Finished (disk-cached): {self.final_bam}", self.verbose)
