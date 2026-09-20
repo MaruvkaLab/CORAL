@@ -14,8 +14,9 @@ import pandas as pd
 from .cleanup_manager import PipelineCleaner
 from .genome_manager import Genome
 from .alignment_manager import Aligner
+from .bam_extractor import BamPairExtractor
 from .multiple_species_mutation_extractor_manager import MultipleSpeciesMutationExtractor
-from .mutation_extractor_manager import FiveMerExtractor, MutationExtractor, MutationNormalizer, PairExtractor, ParallelMutationExtractor, TripletExtractor
+from .mutation_extractor_manager import FiveMerExtractor, MutationExtractor, MutationNormalizer, ParallelMutationExtractor, TripletExtractor
 from .pileup_manager import Pileup
 from .plot_utils import CoveragePlotter, MutationDensityPlotter, MutationSpectraPlotter
 from .utils import get_top_n_chromosomes, log
@@ -324,7 +325,9 @@ class MutationExtractionPipeline:
         cores = self.params.get("cores")
         parallel_extract = bool(cores) and cores > 1
         # Parallel extraction makes per-chromosome pileups; the serial, 5-mer and annotated scans need the whole genome.
-        if not parallel_extract or self.params.get("five_mer", False) or self.params.get("annotate", False):
+        if self.pair:
+            log("Pair mode: scanning the BAM directly, so no pileup is generated.", self.verbose)
+        elif not parallel_extract or self.params.get("five_mer", False) or self.params.get("annotate", False):
             self.pileup_path = pileup_generator.generate()
         else:
             log("Parallel extraction enabled: skipping whole-genome pileup "
@@ -387,12 +390,11 @@ class MutationExtractionPipeline:
         normalizer.normalize()
 
     def extract_pair(self):
-        PairExtractor(
+        BamPairExtractor(
             reference=self.reference.name,
             target=self.genomes[0].name,
             ref_fasta=self.reference.fasta_path,
             bam=self.alignments[0].final_bam,
-            pileup_file=self.pileup_path,
             mutation_output_dir=os.path.join(self.output_dir, 'Mutations'),
             triplet_output_dir=os.path.join(self.output_dir, 'Triplets'),
             cores=self.params.get("cores"),

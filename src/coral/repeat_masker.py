@@ -91,6 +91,55 @@ class RepeatMask:
             sub._ends[chrom] = self._ends[chrom]
         return sub
 
+    def for_span(self, chrom, start, end):
+        """A RepeatMask holding only the intervals of `chrom` that overlap the
+        1-based inclusive span [start, end] (shares the underlying arrays as
+        slice views, no copy). Lets the tiled extractor ship each worker just its
+        tile's mask instead of the whole chromosome's -- a chromosome's mask would
+        otherwise be pickled once per tile, and pickling a slice view sends only
+        the slice."""
+        sub = RepeatMask()
+        starts = self._starts.get(chrom)
+        if starts is None or len(starts) == 0:
+            return sub
+        ends = self._ends[chrom]
+        # Merged intervals are sorted in both arrays, so the overlapping ones are
+        # a contiguous slice -- the same bounds mask_array computes below.
+        first = int(ends.searchsorted(start, "left"))
+        last = int(starts.searchsorted(end, "right"))
+        if first < last:
+            sub._starts[chrom] = starts[first:last]
+            sub._ends[chrom] = ends[first:last]
+        return sub
+
+    def mask_array(self, chrom, start, end):
+        """Bool array over the 1-based inclusive span [start, end]: True where masked.
+
+        `contains` per position costs a searchsorted each; the array scans are
+        given a whole tile at once, so the overlapping intervals are painted into
+        a difference array in one pass instead.
+        """
+        n = end - start + 1
+        if n <= 0:
+            return np.zeros(0, bool)
+        out = np.zeros(n, bool)
+        starts = self._starts.get(chrom)
+        if starts is None or len(starts) == 0:
+            return out
+        ends = self._ends[chrom]
+        # Intervals are merged, so both arrays are sorted: the ones overlapping
+        # the span are a contiguous slice.
+        first = int(ends.searchsorted(start, "left"))
+        last = int(starts.searchsorted(end, "right"))
+        if first >= last:
+            return out
+        a = np.maximum(starts[first:last], start) - start
+        b = np.minimum(ends[first:last], end) - start
+        diff = np.zeros(n + 1, np.int32)
+        np.add.at(diff, a, 1)
+        np.add.at(diff, b + 1, -1)
+        return np.cumsum(diff[:n]) > 0
+
     def masked_bases(self, chrom, start, end):
         """Number of masked bases in the 1-based inclusive span [start, end]."""
         starts = self._starts.get(chrom)
