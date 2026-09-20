@@ -98,6 +98,24 @@ This runs the full pipeline, including genome download, reference indexing, read
 
 ---
 
+### Two-taxon pipeline (reference + target)
+
+```bash
+coral run_pair \
+  --reference Saccharomyces_mikatae_IFO_1815 GCF_947241705.1 \
+  --target Saccharomyces_cerevisiae_S288C GCF_000146045.2 \
+  --output ../test_output \
+  --mapq 60
+```
+
+With no outgroup there is nothing to tell which lineage changed, so a call is a difference
+between the two genomes rather than a mutation on a branch. Calls are folded to the 52
+undirected classes (`A[C-T]G`), with the change as seen from the reference kept beside them.
+The alignment and window options are those of `run_trio`; `--annotate`, `--five-mer` and the
+normalised tables are not available.
+
+---
+
 ### Multi-species analysis (experimental)
 
 ```bash

@@ -304,6 +304,95 @@ def scan_pileup(line_iter, on_mut1=None, on_mut2=None, ref_mask=None, indel_wind
     return mut1, mut2, trip1, trip2, summary, ref_diff
 
 
+COMPLEMENT = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A'}
+
+
+def reverse_complement(seq):
+    return ''.join(COMPLEMENT[b] for b in reversed(seq))
+
+
+def fold(ref, target):
+    """Two triplets differing at the middle base -> one of 52 undirected labels, e.g. A[C-T]G.
+
+    The strand is chosen so the middle pair is C-T, C-A, C-G or T-A. C-G and T-A are their own
+    reverse complement, so their context is also folded: the smaller of L_R and its complement.
+    """
+    if {ref[1], target[1]} in ({'A', 'G'}, {'G', 'T'}):
+        ref, target = reverse_complement(ref), reverse_complement(target)
+    pair = {ref[1], target[1]}
+    first = 'C' if 'C' in pair else 'T'
+    second = (pair - {first}).pop()
+    left, right = ref[0], ref[2]
+    if pair in ({'C', 'G'}, {'A', 'T'}):
+        left, right = min((left, right), (COMPLEMENT[right], COMPLEMENT[left]))
+    return f"{left}[{first}-{second}]{right}"
+
+
+def parse_pair_line(line):
+    parts = line.rstrip('\n').split('\t')
+    if len(parts) < 6:
+        return None
+    return PileupLine(parts[:5])
+
+
+def pair_check(line, dropped=None):
+    """quality_check for a one-sample pileup."""
+    reason = 'unparsed' if line is None else sample_problem(line[N_READS_1_IDX], line[NUC_1_IDX], line.clean(NUC_1_IDX))
+    if reason and dropped is not None:
+        dropped[reason] += 1
+    return reason is None
+
+
+def scan_pair(line_iter, on_mut=None, ref_mask=None, indel_window=1):
+    """scan_pileup for one target against the reference. A window is called if its three bases are clean in the
+    target and ACGT in both, the flanks are the same and the middle differs; the call is folded to one of 52
+    undirected classes. on_mut(chrom, pos, change, mutation) gets the change as seen from the reference, e.g. A[C>T]G,
+    and its class. Returns (mutations, triplets, summary); triplets counts the reference 3-mer of every called or
+    identical window."""
+    muts = defaultdict(int)
+    trips = defaultdict(int)
+    classes = defaultdict(int)
+    dropped = defaultdict(int)
+    stats = defaultdict(int)
+    n_near = 0
+
+    masked = _masked_line(ref_mask) if ref_mask else None
+    event = lambda raw, line: has_indel(line[N_READS_1_IDX], line[NUC_1_IDX])
+    for window, near in scan_windows(line_iter, parse_pair_line, lambda line: pair_check(line, dropped),
+                                     event, indel_window, masked, stats=stats):
+        if near:
+            n_near += 1
+            continue
+        ref = ''.join(line.nuc(REF_NUC_IDX) for line in window)
+        target = ''.join(r if t in ',.' else t for r, t in zip(ref, (line.nuc(NUC_1_IDX) for line in window)))
+        if not all(b in 'ACGT' for b in ref + target):
+            site_class = 'not_acgt'
+        elif ref[0] != target[0] or ref[2] != target[2]:
+            site_class = 'flanks_not_conserved'
+        elif ref[1] == target[1]:
+            site_class = 'identical'
+        else:
+            site_class = 'differs'
+        classes[site_class] += 1
+        if site_class in ('identical', 'differs'):
+            trips[ref] += 1
+        if site_class == 'differs':
+            mutation = fold(ref, target)
+            muts[mutation] += 1
+            if on_mut:
+                on_mut(window[1][CHR_IDX], int(window[1][POSITION_IDX]), f"{ref[0]}[{ref[1]}>{target[1]}]{ref[2]}", mutation)
+
+    windows = {'non_consecutive': stats['non_consecutive']}
+    if indel_window > 1:
+        windows['near_indel'] = n_near
+    summary = {
+        'pileup_lines': dict(dropped, lines_after_mask=stats['lines'], lines_masked=stats['masked']),
+        'candidate_windows': windows,
+        'site_classes': dict(classes),
+    }
+    return muts, trips, summary
+
+
 def _merge_summary(dst, src):
     for section, counts in src.items():
         into = dst.setdefault(section, defaultdict(int))
@@ -424,13 +513,29 @@ def _chroms_with_reads(bams):
     return have
 
 
+def _region_pileup(chrom, ref_fasta, bams, scan):
+    """Generate this chromosome's pileup via index-based `samtools mpileup -r <chrom>`
+    (so no worker ever streams the whole file) and return scan(stream). The mpileup
+    options match Pileup.generate exactly (-B -d 100), so a chromosome's output is
+    byte-identical to its slice of the whole-genome pileup."""
+    cmd = ["samtools", "mpileup", "-f", ref_fasta, "-B", "-d", "100", "-r", chrom] + list(bams)
+    with tempfile.TemporaryFile() as errf:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf)
+        try:
+            with TextIOWrapper(proc.stdout) as stream:
+                result = scan(stream)
+        finally:
+            proc.wait()
+        if proc.returncode != 0:
+            errf.seek(0)
+            raise subprocess.CalledProcessError(
+                proc.returncode, cmd, stderr=errf.read().decode('utf-8', 'replace')[-2000:])
+    return result
+
+
 def _extract_region(chrom, ref_fasta, bams, no_full_mutations, ref_mask=None, indel_window=1):
-    """Worker: generate this chromosome's pileup via index-based
-    `samtools mpileup -r <chrom>` (so no worker ever streams the whole file),
-    then scan it with the shared scan_pileup. The mpileup options match
-    Pileup.generate exactly (-B -d 100), so a chromosome's output is byte-
-    identical to its slice of the whole-genome pileup. Returns (chrom, count
-    dicts, CSV rows)."""
+    """Worker: scan this chromosome's pileup with the shared scan_pileup.
+    Returns (chrom, count dicts, CSV rows)."""
     rows1 = []
     rows2 = []
     on1 = on2 = None
@@ -438,20 +543,18 @@ def _extract_region(chrom, ref_fasta, bams, no_full_mutations, ref_mask=None, in
         on1 = lambda c, pos, m: rows1.append(f"{c},{pos},{m}\n")
         on2 = lambda c, pos, m: rows2.append(f"{c},{pos},{m}\n")
 
-    cmd = ["samtools", "mpileup", "-f", ref_fasta, "-B", "-d", "100", "-r", chrom] + list(bams)
-    with tempfile.TemporaryFile() as errf:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf)
-        try:
-            with TextIOWrapper(proc.stdout) as stream:
-                mut1, mut2, trip1, trip2, summary, ref_diff = scan_pileup(stream, on1, on2, ref_mask=ref_mask,
-                                                                          indel_window=indel_window)
-        finally:
-            proc.wait()
-        if proc.returncode != 0:
-            errf.seek(0)
-            raise subprocess.CalledProcessError(
-                proc.returncode, cmd, stderr=errf.read().decode('utf-8', 'replace')[-2000:])
+    mut1, mut2, trip1, trip2, summary, ref_diff = _region_pileup(
+        chrom, ref_fasta, bams, lambda stream: scan_pileup(stream, on1, on2, ref_mask=ref_mask, indel_window=indel_window))
     return chrom, dict(mut1), dict(mut2), dict(trip1), dict(trip2), rows1, rows2, summary, dict(ref_diff)
+
+
+def _extract_pair_region(chrom, ref_fasta, bam, ref_mask=None, indel_window=1):
+    """Worker: scan this chromosome's pileup with scan_pair. Returns (chrom, count dicts, CSV rows, summary)."""
+    rows = []
+    on_mut = lambda c, pos, change, m: rows.append(f"{c},{pos},{change},{m}\n")
+    muts, trips, summary = _region_pileup(
+        chrom, ref_fasta, [bam], lambda stream: scan_pair(stream, on_mut, ref_mask=ref_mask, indel_window=indel_window))
+    return chrom, dict(muts), dict(trips), rows, summary
 
 
 class ParallelMutationExtractor:
@@ -566,6 +669,78 @@ class ParallelMutationExtractor:
                                  summary=summary, summary_json=self.classes_json, ref_diff=ref_diff)
         log(f"Saved mutation counts to {self.out_json1} and {self.out_json2}", self.verbose)
         log(f"Saved triplet counts to {self.trip_out_json1} and {self.trip_out_json2}", self.verbose)
+
+
+class PairExtractor:
+    """Pair mode: one target against the reference. Scans the whole-genome pileup, or with cores > 1
+    each chromosome with reads in its own task, as ParallelMutationExtractor does."""
+
+    def __init__(self, reference, target, ref_fasta, bam, pileup_file, mutation_output_dir, triplet_output_dir,
+                 cores=None, no_cache=False, verbose=True, ref_mask=None, indel_window=1):
+        self.reference = reference
+        self.target = target
+        self.ref_fasta = ref_fasta
+        self.bam = bam
+        self.pileup_file = pileup_file
+        self.cores = cores
+        self.no_cache = no_cache
+        self.verbose = verbose
+        self.ref_mask = ref_mask
+        self.indel_window = indel_window
+        self.mutation_output_dir = mutation_output_dir
+        self.triplet_output_dir = triplet_output_dir
+
+        self.out_json = os.path.join(mutation_output_dir, f"{target}__{reference}__mutations.json")
+        self.csv_path = os.path.join(mutation_output_dir, f"{target}__{reference}__mutations.csv.gz")
+        self.trip_out_json = os.path.join(triplet_output_dir, f"{target}__{reference}__triplets.json")
+        self.classes_json = os.path.join(os.path.dirname(mutation_output_dir), "run_summary.json")
+
+    def extract(self):
+        os.makedirs(self.mutation_output_dir, exist_ok=True)
+        os.makedirs(self.triplet_output_dir, exist_ok=True)
+        if not self.no_cache and all(os.path.exists(p) for p in
+                                     [self.out_json, self.csv_path, self.trip_out_json, self.classes_json]):
+            log("Mutation counts already exist. Skipping.", self.verbose)
+            return
+
+        with gzip.open(self.csv_path, 'wt') as csv:
+            csv.write("chromosome,position,change,mutation\n")
+            if self.cores and self.cores > 1:
+                chrom_lengths = _read_fai_chroms(self.ref_fasta + ".fai")
+                with_reads = _chroms_with_reads([self.bam])
+                tasks = [c for c, _ in sorted(chrom_lengths, key=lambda cl: cl[1], reverse=True) if c in with_reads]
+                log(f"Extracting mutations in parallel: {len(tasks)} chromosomes with reads...", self.verbose)
+                args = [(c, self.ref_fasta, self.bam, self.ref_mask.for_contig(c) if self.ref_mask else None,
+                         self.indel_window) for c in tasks]
+                results = {}
+                if args:
+                    with multiprocessing.Pool(max(1, min(self.cores, len(args)))) as pool:
+                        results = {r[0]: r[1:] for r in pool.starmap(_extract_pair_region, args, chunksize=1)}
+                muts = defaultdict(int)
+                trips = defaultdict(int)
+                summary = {}
+                for chrom, _ in chrom_lengths:
+                    if chrom not in results:
+                        continue
+                    m, t, rows, sm = results[chrom]
+                    for k, v in m.items():
+                        muts[k] += v
+                    for k, v in t.items():
+                        trips[k] += v
+                    _merge_summary(summary, sm)
+                    csv.writelines(rows)
+            else:
+                with gzip.open(self.pileup_file, 'rt') as f:
+                    muts, trips, summary = scan_pair(f, lambda c, pos, change, m: csv.write(f"{c},{pos},{change},{m}\n"),
+                                                     ref_mask=self.ref_mask, indel_window=self.indel_window)
+
+        with open(self.out_json, 'w') as f:
+            json.dump(dict(muts), f, indent=2)
+        with open(self.trip_out_json, 'w') as f:
+            json.dump(dict(trips), f, indent=2)
+        with open(self.classes_json, 'w') as f:
+            json.dump({section: dict(counts) for section, counts in summary.items()}, f, indent=2)
+        log(f"Saved mutation counts to {self.out_json} and triplet counts to {self.trip_out_json}", self.verbose)
 
 
 class FiveMerExtractor:

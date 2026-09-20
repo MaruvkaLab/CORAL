@@ -45,6 +45,13 @@ If you specify `--suffix test`, the run_id becomes:
 <outgroup_name>__<species1_name>__<species2_name>_test
 ```
 
+### For `coral run_pair`:
+
+**Default run_id:**
+```
+<reference_name>__<target_name>
+```
+
 ### For `coral run_multi`:
 
 **Default run_id:**
@@ -98,6 +105,20 @@ Saccharomyces_cerevisiae_S288C__Saccharomyces_paradoxus__Saccharomyces_mikatae_I
 - CSV files: `<run_id>/Mutations/`
 - JSON files: `<run_id>/Mutations/`
 
+#### Pair mode
+
+`coral run_pair` writes one pair of files, for the target against the reference:
+```
+<target>__<reference>__mutations.csv.gz
+<target>__<reference>__mutations.json
+```
+
+The CSV has a row per call: `chromosome,position,change,mutation`, for example
+`24,10976,C[T>C]T,C[C-T]T`. `change` is what the window looks like from the reference
+(reference `CTT`, target `CCT`); `mutation` is the same call folded to one of the 52
+undirected classes. The JSON counts those 52 classes. Because there is no outgroup, neither
+column says which lineage changed.
+
 ### Triplet Files
 
 **Pattern:**
@@ -107,6 +128,9 @@ Saccharomyces_cerevisiae_S288C__Saccharomyces_paradoxus__Saccharomyces_mikatae_I
 
 **Location:**
 `<run_id>/Triplets/`
+
+Pair mode writes `<target>__<reference>__triplets.json`: the reference 3-mer of every window
+that was called or identical, i.e. the windows a call could have been made in.
 
 ### Normalized Spectra Tables
 
@@ -283,6 +307,9 @@ not counted, so that the whole-genome scan and the per-chromosome parallel scan 
 identical summaries.
 `near_indel` (only with `--indel-window` K > 1) is windows left out because a read has a
 deleted base or an insertion within K bp of their middle base.
+
+**`site_classes`** in pair mode are `differs` (a call), `identical`, `flanks_not_conserved`
+and `not_acgt` (a window base is not A/C/G/T in the reference or the target).
 
 **`site_classes`** counts the windows that were scored, partitioning them:
 

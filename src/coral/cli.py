@@ -53,6 +53,38 @@ def main():
                              "range (with and without continuity) at which it is made, to Annotated/. "
                              "--mapq and --continuity are not used; standard spectra and plots are skipped")
 
+    # === Pair-Pipeline ===
+    pair = subparsers.add_parser("run_pair", help="Run 2-species pipeline (reference + target), 52 undirected classes")
+    pair.add_argument("--reference", nargs=2, metavar=("NAME", "ACCESSION"), required=True)
+    pair.add_argument("--target", nargs=2, metavar=("NAME", "ACCESSION"), required=True)
+    pair.add_argument("--output", required=True)
+    pair.add_argument("--no-cache", action="store_true")
+    verbose_group_pair = pair.add_mutually_exclusive_group()
+    verbose_group_pair.add_argument("--verbose", dest="verbose", action="store_true", help="Enable verbose logging (default: enabled)")
+    verbose_group_pair.add_argument("--quiet", dest="verbose", action="store_false", help="Disable verbose logging")
+    pair.set_defaults(verbose=True)
+    pair.add_argument("--suffix", default=None)
+    pair.add_argument("--aligner-name", default="bwa-mem2")
+    pair.add_argument("--aligner-cmd", default=None)
+    pair.add_argument("--streamed", action="store_true")
+    pair.add_argument("--mapq", type=int, default=60)
+    pair.add_argument("--low-mapq", type=int, default=1)
+    continuity_group_pair = pair.add_mutually_exclusive_group()
+    continuity_group_pair.add_argument("--continuity", action="store_true", default=True, help="Enable continuity mode (default)")
+    continuity_group_pair.add_argument("--no-continuity", dest="continuity", action="store_false", help="Disable continuity mode")
+    pair.add_argument("--continuity-run", type=int, default=2, metavar="N",
+                      help="A read below --mapq is rescued if it is part of a run of at least N consecutive "
+                           "fragments, each overlapping the next. 2 (default): an overlapping neighbour")
+    pair.add_argument("--cores", type=int, default=None)
+    pair.add_argument("--repeat-mask", dest="repeat_mask", nargs="?", const="windowmasker",
+                      default=None, choices=["windowmasker", "repeatmasker"], metavar="TOOL",
+                      help="Mask repeats, as in run_trio")
+    pair.add_argument("--repeat-species", dest="repeat_species", default=None, metavar="CLADE",
+                      help="RepeatMasker library clade; only with --repeat-mask repeatmasker")
+    pair.add_argument("--indel-window", type=int, default=1, metavar="K",
+                      help="A window is not called if its middle base is within K bp of an indel in any kept read. "
+                           "1 (default): only the window's own three bases")
+
     multi = subparsers.add_parser("run_multi", help="Run multi-species pipeline from Newick")
     multi.add_argument("--newick-tree", default=None)
     multi.add_argument("--species-list", type=json.loads, default=None, help='List of species as JSON, e.g. \'[["Homo_sapiens", "GCF_..."], ...]\'')
@@ -136,6 +168,29 @@ def main():
                 repeat_masker=args.repeat_mask or "windowmasker",
                 repeat_species=args.repeat_species,
                 annotate=args.annotate,
+                indel_window=args.indel_window,
+            )
+            pipeline.run()
+
+        elif args.subcmd == "run_pair":
+            pipeline = MutationExtractionPipeline(
+                species_list=[(args.target[0], args.target[1])],
+                outgroup=(args.reference[0], args.reference[1]),
+                base_output_dir=args.output,
+                no_cache=args.no_cache,
+                verbose=args.verbose,
+                suffix=args.suffix,
+                aligner_name=args.aligner_name,
+                aligner_cmd=args.aligner_cmd,
+                streamed=args.streamed,
+                mapq=args.mapq,
+                low_mapq=args.low_mapq,
+                cores=args.cores,
+                continuity=args.continuity,
+                continuity_run=args.continuity_run,
+                repeat_mask=bool(args.repeat_mask),
+                repeat_masker=args.repeat_mask or "windowmasker",
+                repeat_species=args.repeat_species,
                 indel_window=args.indel_window,
             )
             pipeline.run()

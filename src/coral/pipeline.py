@@ -15,7 +15,7 @@ from .cleanup_manager import PipelineCleaner
 from .genome_manager import Genome
 from .alignment_manager import Aligner
 from .multiple_species_mutation_extractor_manager import MultipleSpeciesMutationExtractor
-from .mutation_extractor_manager import FiveMerExtractor, MutationExtractor, MutationNormalizer, ParallelMutationExtractor, TripletExtractor
+from .mutation_extractor_manager import FiveMerExtractor, MutationExtractor, MutationNormalizer, PairExtractor, ParallelMutationExtractor, TripletExtractor
 from .pileup_manager import Pileup
 from .plot_utils import CoveragePlotter, MutationDensityPlotter, MutationSpectraPlotter
 from .utils import get_top_n_chromosomes, log
@@ -74,10 +74,14 @@ class MutationExtractionPipeline:
                  verbose = True, 
                  run_id = None,
                  **kwargs):
-        if len(species_list) != 2:
+        if len(species_list) not in (1, 2):
             raise ValueError(
-                f"MutationExtractionPipeline needs exactly 2 ingroup species, got {len(species_list)}. "
+                f"MutationExtractionPipeline needs 1 (pair) or 2 (trio) ingroup species, got {len(species_list)}. "
                 "Use MultiSpeciesMutationPipeline for more.")
+        # Pair mode: one target against the reference (passed as the outgroup)
+        self.pair = len(species_list) == 1
+        if self.pair and kwargs.get("annotate", False):
+            raise ValueError("Pair mode has no annotate option")
         self.species_list = species_list  # list of (name, accession)
         self.outgroup = outgroup          # (name, accession)
         self.aligner_name = aligner_name
@@ -149,6 +153,9 @@ class MutationExtractionPipeline:
         timed_stage("Generate Pileup", self.generate_pileup)
         if self.params.get("annotate", False):
             timed_stage("Extract Annotated Calls", self.extract_annotated)
+        elif self.pair:
+            timed_stage("Extract Mutations and Triplets", self.extract_pair)
+            timed_stage("Extract Intervals", self.extract_intervals)
         else:
             timed_stage("Extract Mutations and Triplets", self.extract_mutations_and_triplets)
             timed_stage("Extract Intervals", self.extract_intervals)
@@ -378,6 +385,21 @@ class MutationExtractionPipeline:
             divergence_time= self.params.get("divergence_time", None),
         )
         normalizer.normalize()
+
+    def extract_pair(self):
+        PairExtractor(
+            reference=self.reference.name,
+            target=self.genomes[0].name,
+            ref_fasta=self.reference.fasta_path,
+            bam=self.alignments[0].final_bam,
+            pileup_file=self.pileup_path,
+            mutation_output_dir=os.path.join(self.output_dir, 'Mutations'),
+            triplet_output_dir=os.path.join(self.output_dir, 'Triplets'),
+            cores=self.params.get("cores"),
+            no_cache=self.no_cache,
+            verbose=self.verbose,
+            ref_mask=self.reference_mask,
+            indel_window=self.params.get("indel_window", 1)).extract()
 
     def extract_annotated(self):
         write_annotated_outputs(
