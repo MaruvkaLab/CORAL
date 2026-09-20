@@ -17,6 +17,13 @@ DEFAULT_MAPQ_THRESHOLD = 60
 DEFAULT_OFFSET = 75
 
 
+def has_bam_index(bam_path):
+    """samtools index writes a .bai, or a .csi with -c -- which is what the
+    disk-cached path uses, since .bai cannot address contigs over 512 Mb. Either
+    one lets pysam and `mpileup -r` seek, so either satisfies a cache check."""
+    return os.path.exists(bam_path + '.bai') or os.path.exists(bam_path + '.csi')
+
+
 def log_to_file(log_path: Optional[str], message: str):
     if log_path:
         with open(log_path, 'a') as f:
@@ -399,7 +406,7 @@ class Aligner:
                 raise ValueError(f"--aligner-cmd must include placeholders: {', '.join(required)}")
 
     def align_streamed(self, mapq=60, low_mapq = 1, max_sort_mem=None, continuity = True, continuity_run=2):
-        if os.path.exists(self.final_bam) and os.path.exists(self.final_bam + '.bai') and not self.no_cache:
+        if os.path.exists(self.final_bam) and has_bam_index(self.final_bam) and not self.no_cache:
             log(f"Streamed alignment already exists: {self.final_bam}", self.verbose)
             return self.final_bam
 
@@ -518,7 +525,7 @@ class Aligner:
             os.rename(tmp_final_bam, self.final_bam) 
 
         # Step 3: Index final.bam
-        if (not os.path.exists(self.final_bam + '.bai') and not os.path.exists(self.final_bam + '.csi')) or self.no_cache:
+        if not has_bam_index(self.final_bam) or self.no_cache:
             # run_cmd(["samtools", "index", self.final_bam])
             run_cmd(["samtools", "index", '-c', self.final_bam])
 
