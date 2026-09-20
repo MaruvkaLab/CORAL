@@ -25,7 +25,7 @@ from collections import defaultdict
 import numpy as np
 import pysam
 
-from .mutation_extractor_manager import _chroms_with_reads, _read_fai_chroms, fold
+from .mutation_extractor_manager import (_chroms_with_reads, _read_fai_chroms, _write_extractor_outputs, fold)
 from .utils import log
 
 # mpileup's default --ff: UNMAP, SECONDARY, QCFAIL, DUP.
@@ -127,10 +127,11 @@ def scan_region(bam, chrom, lo, hi):
     return covered, base, disagree, deleted, inserted
 
 
-def tile_spans(fai_path, bam_path, tile_bp):
-    """returns a list of tiles in reference (.fai) order, to be processed in chunks to avoid exploding memory."""
+def tile_spans(fai_path, bams, tile_bp):
+    """returns a list of tiles in reference (.fai) order, to be processed in chunks to avoid exploding memory.
+    `bams` is one path or several; a contig is tiled if any of them has reads there."""
     lengths = _read_fai_chroms(fai_path)
-    have = _chroms_with_reads([bam_path])
+    have = _chroms_with_reads([bams] if isinstance(bams, str) else list(bams))
     return [(chrom, start, min(start + tile_bp, length), length)
             for chrom, length in lengths if chrom in have
             for start in range(0, length, tile_bp)]
@@ -377,3 +378,260 @@ class BamPairExtractor:
         with open(self.classes_json, 'w') as f:
             json.dump({section: dict(counts) for section, counts in summary.items()}, f, indent=2)
         log(f"Saved mutation counts to {self.out_json} and triplet counts to {self.trip_out_json}", self.verbose)
+
+
+# ---------------------------------------------------------------- trio mode ----
+
+def _sample_problems(covered, deleted, inserted, disagree):
+    """One sample's reasons a position is unusable, in sample_problem's order:
+    no reads, then a deletion, an insertion, then disagreeing reads."""
+    return (~covered,
+            covered & deleted,
+            covered & ~deleted & inserted,
+            covered & ~deleted & ~inserted & disagree)
+
+
+def _keyed(cols, fmt):
+    """(inverse index, names) for parallel uint8 columns: only the distinct byte
+    combinations become strings -- a few dozen, against millions of rows. Unlike
+    pair mode this keeps raw bytes, because the trio scan compares characters and
+    never checks for ACGT, so an N has to survive into the key."""
+    key = np.zeros(len(cols[0]), np.int64)
+    for col in cols:
+        key = (key << 8) | col.astype(np.int64)
+    uniq, inv = np.unique(key, return_inverse=True)
+    width = len(cols)
+    names = [fmt(*[chr((k >> (8 * (width - 1 - i))) & 0xFF) for i in range(width)])
+             for k in uniq.tolist()]
+    return inv, names
+
+
+def _tally(inv, names, into):
+    for i, count in enumerate(np.bincount(inv, minlength=len(names)).tolist()):
+        if count:
+            into[names[i]] = into.get(names[i], 0) + count
+
+
+def _scan_trio_tile(task):
+    """Processes one tile for two taxa against the reference: the trio counterpart
+    of _scan_pair_tile. mpileup emits a line wherever *either* BAM has reads, so
+    no_depth is a real dropped reason here, unlike in pair mode."""
+    bam1, bam2, fasta_path, chrom, lo, hi, length, ref_mask, indel_window, no_rows = task
+    a, b = tile_scan_span(lo, hi, length, indel_window)
+    n = b - a
+
+    ref = np.frombuffer(_opened('fasta', fasta_path).fetch(chrom, a, b).upper().encode(), np.uint8)
+    cov1, base1, dis1, del1, ins1 = scan_region(_opened('bam', bam1), chrom, a, b)
+    cov2, base2, dis2, del2, ins2 = scan_region(_opened('bam', bam2), chrom, a, b)
+    masked = ref_mask.mask_array(chrom, a + 1, b) if ref_mask is not None else None
+
+    line = cov1 | cov2                      # a pileup line exists if either sample has reads
+    if masked is not None:
+        line &= ~masked
+
+    nd1, dl1, in1, ds1 = _sample_problems(cov1, del1, ins1, dis1)
+    nd2, dl2, in2, ds2 = _sample_problems(cov2, del2, ins2, dis2)
+    # quality_check takes the union of both samples' problems and reports the first
+    # of deletion, insertion, no_depth, reads_disagree -- an order of its own.
+    any_del, any_ins = dl1 | dl2, in1 | in2
+    any_nd, any_dis = nd1 | nd2, ds1 | ds2
+    clean = line & ~any_del & ~any_ins & ~any_nd & ~any_dis
+
+    inside = slice(lo - a, hi - a)
+    ln = line[inside]
+    dropped = {}
+    for name, flag in (('deletion', any_del[inside]),
+                       ('insertion', any_ins[inside] & ~any_del[inside]),
+                       ('no_depth', any_nd[inside] & ~any_del[inside] & ~any_ins[inside]),
+                       ('reads_disagree', any_dis[inside] & ~any_del[inside] & ~any_ins[inside] & ~any_nd[inside])):
+        dropped[name] = int((ln & flag).sum())
+    lines_after_mask = int(ln.sum())
+    lines_masked = int(((cov1 | cov2)[inside] & masked[inside]).sum()) if masked is not None else 0
+
+    if n >= 3:
+        mid = np.flatnonzero(clean[:-2] & clean[1:-1] & clean[2:]) + 1
+        mid = mid[(mid >= lo - a) & (mid < hi - a)]
+    else:
+        mid = np.empty(0, np.int64)
+
+    # scan_windows needs three adjacent *lines* clean, not three bases. A gap is
+    # such a triple whose outer lines are not two apart.
+    line_idx = np.flatnonzero(ln)
+    line_clean = clean[inside][line_idx]
+    if line_idx.size >= 3:
+        triple = line_clean[:-2] & line_clean[1:-1] & line_clean[2:]
+        gaps = int((triple & ~(line_idx[2:] == line_idx[:-2] + 2)).sum())
+    else:
+        gaps = 0
+    edge = [(int(lo + p), bool(c)) for p, c in zip(line_idx[:2].tolist(), line_clean[:2].tolist())]
+    tail = [(int(lo + p), bool(c)) for p, c in zip(line_idx[-2:].tolist(), line_clean[-2:].tolist())]
+
+    n_near = 0
+    if indel_window > 1 and mid.size:
+        events = (del1 | ins1 | del2 | ins2).astype(np.int64)
+        cs = np.concatenate(([0], np.cumsum(events)))
+        near = (cs[np.minimum(mid + indel_window + 1, n)] - cs[np.maximum(mid - indel_window, 0)]) > 0
+        n_near = int(near.sum())
+        mid = mid[~near]
+
+    # detect_mutation_triplet, vectorised. It compares characters and has no
+    # not_acgt class, so these stay raw bytes rather than the ACGT codes pair uses.
+    r_p, r_c, r_n = ref[mid - 1], ref[mid], ref[mid + 1]
+    a_c, b_c = base1[mid], base2[mid]
+    flanks = ((r_p == base1[mid - 1]) & (r_p == base2[mid - 1])
+              & (r_n == base1[mid + 1]) & (r_n == base2[mid + 1]))
+    eq1, eq2, eq12 = r_c == a_c, r_c == b_c, a_c == b_c
+    sel = {'taxa2_mut': flanks & eq1 & ~eq2,
+           'taxa1_mut': flanks & ~eq1 & eq2,
+           'identical': flanks & eq1 & eq2,
+           'ref_differs': flanks & ~eq1 & ~eq2 & eq12,
+           'all_differ': flanks & ~eq1 & ~eq2 & ~eq12}
+    classes = {'flanks_not_conserved': int((~flanks).sum())}
+    classes.update({name: int(m.sum()) for name, m in sel.items()})
+
+    mut1, mut2, trip1, trip2, ref_diff = {}, {}, {}, {}, {}
+    rows1 = rows2 = ''
+    # taxa1_mut, taxa2_mut and identical all contribute the reference 3-mer to both
+    # triplet tallies, exactly as detect_mutation_triplet does.
+    counted = sel['taxa1_mut'] | sel['taxa2_mut'] | sel['identical']
+    if counted.any():
+        inv, names = _keyed((r_p[counted], r_c[counted], r_n[counted]),
+                            lambda p, c, nx: p + c + nx)
+        _tally(inv, names, trip1)
+        trip2.update(trip1)
+
+    for m, into, other, want_rows in ((sel['taxa1_mut'], mut1, a_c, True),
+                                      (sel['taxa2_mut'], mut2, b_c, False)):
+        if not m.any():
+            continue
+        inv, names = _keyed((r_p[m], r_c[m], other[m], r_n[m]),
+                            lambda p, c, t, nx: f"{p}[{c}>{t}]{nx}")
+        _tally(inv, names, into)
+        if not no_rows:
+            positions = (mid[m] + 1 + a).tolist()
+            rows = ''.join(f"{chrom},{p},{names[i]}\n" for p, i in zip(positions, inv.tolist()))
+            if want_rows:
+                rows1 = rows
+            else:
+                rows2 = rows
+
+    m = sel['ref_differs']
+    if m.any():
+        inv, names = _keyed((r_p[m], a_c[m], r_c[m], r_n[m]),
+                            lambda p, s, c, nx: f"{p}[{s}>{c}]{nx}")
+        _tally(inv, names, ref_diff)
+
+    return (chrom, rows1, rows2, mut1, mut2, trip1, trip2, ref_diff, classes, dropped,
+            lines_after_mask, lines_masked, gaps, edge, tail, int(line_idx.size), n_near)
+
+
+class BamTrioExtractor:
+    """Trio mode: two taxa against the reference, scanned from the BAMs.
+
+    Writes exactly the files ParallelMutationExtractor writes -- the same two
+    mutation and two triplet JSONs, the same two CSVs, and the same
+    run_summary.json sections including reference_difference_spectrum.
+    Rows are written as tiles finish, so unlike the pileup path the parent never
+    holds a genome's worth of calls.
+    """
+
+    def __init__(self, reference, taxon1, taxon2, ref_fasta, bams, mutation_output_dir,
+                 triplet_output_dir, cores=None, no_full_mutations=False, no_cache=False,
+                 verbose=True, ref_mask=None, indel_window=1, tile_bp=1_000_000):
+        self.reference = reference
+        self.taxon1 = taxon1
+        self.taxon2 = taxon2
+        self.ref_fasta = ref_fasta
+        self.bams = list(bams)
+        self.cores = cores
+        self.no_full_mutations = no_full_mutations
+        self.no_cache = no_cache
+        self.verbose = verbose
+        self.ref_mask = ref_mask
+        self.indel_window = indel_window
+        self.tile_bp = tile_bp
+        self.mutation_output_dir = mutation_output_dir
+        self.triplet_output_dir = triplet_output_dir
+
+        self.out_json1 = os.path.join(mutation_output_dir, f"{taxon1}__{taxon2}__{reference}__mutations.json")
+        self.out_json2 = os.path.join(mutation_output_dir, f"{taxon2}__{taxon1}__{reference}__mutations.json")
+        self.trip_out_json1 = os.path.join(triplet_output_dir, f"{taxon1}__{taxon2}__{reference}__triplets.json")
+        self.trip_out_json2 = os.path.join(triplet_output_dir, f"{taxon2}__{taxon1}__{reference}__triplets.json")
+        self.csv_path1 = None if no_full_mutations else os.path.join(
+            mutation_output_dir, f"{taxon1}__{taxon2}__{reference}__mutations.csv.gz")
+        self.csv_path2 = None if no_full_mutations else os.path.join(
+            mutation_output_dir, f"{taxon2}__{taxon1}__{reference}__mutations.csv.gz")
+        self.classes_json = os.path.join(os.path.dirname(mutation_output_dir), "run_summary.json")
+
+    def extract(self):
+        os.makedirs(self.mutation_output_dir, exist_ok=True)
+        os.makedirs(self.triplet_output_dir, exist_ok=True)
+        jsons = [self.out_json1, self.out_json2, self.trip_out_json1, self.trip_out_json2]
+        csvs = [] if self.no_full_mutations else [self.csv_path1, self.csv_path2]
+        if not self.no_cache and all(os.path.exists(p) for p in jsons + csvs + [self.classes_json]):
+            log("Mutation counts already exist. Skipping.", self.verbose)
+            return
+
+        spans = tile_spans(self.ref_fasta + ".fai", self.bams, self.tile_bp)
+
+        def tile_mask(chrom, lo, hi, length):
+            if not self.ref_mask:
+                return None
+            a, b = tile_scan_span(lo, hi, length, self.indel_window)
+            sub = self.ref_mask.for_span(chrom, a + 1, b)   # the mask is 1-based inclusive
+            return sub if sub else None
+
+        tasks = [(self.bams[0], self.bams[1], self.ref_fasta, chrom, lo, hi, length,
+                  tile_mask(chrom, lo, hi, length), self.indel_window, self.no_full_mutations)
+                 for chrom, lo, hi, length in spans]
+        log(f"Scanning the BAMs directly: {len(tasks)} tiles of {self.tile_bp:,} bp...", self.verbose)
+
+        mut1, mut2 = defaultdict(int), defaultdict(int)
+        trip1, trip2 = defaultdict(int), defaultdict(int)
+        ref_diff = defaultdict(int)
+        classes, dropped, lines = defaultdict(int), defaultdict(int), defaultdict(int)
+        n_near = 0
+        gap_counter = GapCounter()
+
+        csv1 = csv2 = None
+        if not self.no_full_mutations:
+            csv1 = gzip.open(self.csv_path1, 'wt')
+            csv2 = gzip.open(self.csv_path2, 'wt')
+            csv1.write("chromosome,position,mutation\n")
+            csv2.write("chromosome,position,mutation\n")
+        try:
+            def handle(result):
+                nonlocal n_near
+                (chrom, rows1, rows2, m1, m2, t1, t2, rd, cl, dr,
+                 after_mask, masked_lines, gaps, edge, tail, n_lines, near) = result
+                if csv1 is not None:
+                    csv1.write(rows1)
+                    csv2.write(rows2)
+                for dst, src in ((mut1, m1), (mut2, m2), (trip1, t1), (trip2, t2),
+                                 (ref_diff, rd), (classes, cl), (dropped, dr)):
+                    for k, v in src.items():
+                        dst[k] += v
+                lines['lines_after_mask'] += after_mask
+                lines['lines_masked'] += masked_lines
+                n_near += near
+                gap_counter.add(chrom, gaps, edge, tail, n_lines)
+
+            run_tiles(tasks, _scan_trio_tile, self.cores, handle)
+        finally:
+            if csv1 is not None:
+                csv1.close()
+                csv2.close()
+
+        windows = {'non_consecutive': gap_counter.total}
+        if self.indel_window > 1:
+            windows['near_indel'] = n_near
+        summary = {
+            'pileup_lines': {k: v for k, v in dropped.items() if v} | dict(lines),
+            'candidate_windows': windows,
+            'site_classes': {k: v for k, v in classes.items() if v},
+        }
+        _write_extractor_outputs(dict(mut1), dict(mut2), dict(trip1), dict(trip2),
+                                 self.out_json1, self.out_json2, self.trip_out_json1, self.trip_out_json2,
+                                 summary=summary, summary_json=self.classes_json, ref_diff=dict(ref_diff))
+        log(f"Saved mutation counts to {self.out_json1} and {self.out_json2}", self.verbose)
+        log(f"Saved triplet counts to {self.trip_out_json1} and {self.trip_out_json2}", self.verbose)

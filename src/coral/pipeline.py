@@ -14,9 +14,9 @@ import pandas as pd
 from .cleanup_manager import PipelineCleaner
 from .genome_manager import Genome
 from .alignment_manager import Aligner
-from .bam_extractor import BamPairExtractor
+from .bam_extractor import BamPairExtractor, BamTrioExtractor
 from .multiple_species_mutation_extractor_manager import MultipleSpeciesMutationExtractor
-from .mutation_extractor_manager import FiveMerExtractor, MutationExtractor, MutationNormalizer, ParallelMutationExtractor, TripletExtractor
+from .mutation_extractor_manager import FiveMerExtractor, MutationNormalizer, TripletExtractor
 from .pileup_manager import Pileup
 from .plot_utils import CoveragePlotter, MutationDensityPlotter, MutationSpectraPlotter
 from .utils import get_top_n_chromosomes, log
@@ -322,53 +322,31 @@ class MutationExtractionPipeline:
         self.pileup = pileup_generator
         self.pileup_path = pileup_generator.pileup_path
 
-        cores = self.params.get("cores")
-        parallel_extract = bool(cores) and cores > 1
-        # Parallel extraction makes per-chromosome pileups; the serial, 5-mer and annotated scans need the whole genome.
-        if self.pair:
-            log("Pair mode: scanning the BAM directly, so no pileup is generated.", self.verbose)
-        elif not parallel_extract or self.params.get("five_mer", False) or self.params.get("annotate", False):
+        # The scans read the BAMs directly; only the 5-mer pass and annotate mode
+        # still need the whole-genome pileup.
+        if self.params.get("five_mer", False) or self.params.get("annotate", False):
             self.pileup_path = pileup_generator.generate()
         else:
-            log("Parallel extraction enabled: skipping whole-genome pileup "
-                "(per-chromosome pileups are generated during extraction).", self.verbose)
+            log("Scanning the BAMs directly: skipping the whole-genome pileup.", self.verbose)
 
 
     def extract_mutations_and_triplets(self):
-        cores = self.params.get("cores")
         mut_dir = os.path.join(self.output_dir, 'Mutations')
         trip_dir = os.path.join(self.output_dir, 'Triplets')
-        # cores > 1: chromosome-parallel extraction, identical output
-        if cores and cores > 1:
-            mutation_extractor = ParallelMutationExtractor(
-                reference=self.reference.name,
-                taxon1=self.genomes[0].name,
-                taxon2=self.genomes[1].name,
-                ref_fasta=self.reference.fasta_path,
-                bams=[aligner.final_bam for aligner in self.alignments],
-                mutation_output_dir=mut_dir,
-                triplet_output_dir=trip_dir,
-                fai_path=self.reference.fasta_path + ".fai",
-                cores=cores,
-                no_full_mutations=False,
-                no_cache=self.no_cache,
-                verbose=self.verbose,
-                ref_mask=self.reference_mask,
-                indel_window=self.params.get("indel_window", 1))
-        else:
-            mutation_extractor = MutationExtractor(
-                reference=self.reference.name,
-                taxon1=self.genomes[0].name,
-                taxon2=self.genomes[1].name,
-                pileup_file=self.pileup_path,
-                mutation_output_dir=mut_dir,
-                triplet_output_dir=trip_dir,
-                no_full_mutations=False,
-                no_cache=self.no_cache,
-                verbose=self.verbose,
-                ref_mask=self.reference_mask,
-                indel_window=self.params.get("indel_window", 1))
-        mutation_extractor.extract()
+        BamTrioExtractor(
+            reference=self.reference.name,
+            taxon1=self.genomes[0].name,
+            taxon2=self.genomes[1].name,
+            ref_fasta=self.reference.fasta_path,
+            bams=[aligner.final_bam for aligner in self.alignments],
+            mutation_output_dir=mut_dir,
+            triplet_output_dir=trip_dir,
+            cores=self.params.get("cores"),
+            no_full_mutations=False,
+            no_cache=self.no_cache,
+            verbose=self.verbose,
+            ref_mask=self.reference_mask,
+            indel_window=self.params.get("indel_window", 1)).extract()
 
         # 5-mers are opt-in (--five-mer): an extra pass not used by the standard outputs
         if self.params.get("five_mer", False):
