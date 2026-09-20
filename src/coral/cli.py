@@ -83,7 +83,13 @@ def main():
                       help="RepeatMasker library clade; only with --repeat-mask repeatmasker")
     pair.add_argument("--indel-window", type=int, default=1, metavar="K",
                       help="A window is not called if its middle base is within K bp of an indel in any kept read. "
-                           "1 (default): only the window's own three bases")
+                           "1 (default): only the window's own three bases"
+                           " (with --annotate, K > 1 is recorded as a flag)")
+    pair.add_argument("--annotate", action="store_true",
+                      help="Evaluation mode: keep all reads with MAPQ >= --low-mapq, tag each with its "
+                           "best overlapping neighbour, and write every call with the MAPQ threshold "
+                           "range (with and without continuity) at which it is made, to Annotated/. "
+                           "--mapq and --continuity are not used; the scan runs on the pileup, not the BAM")
 
     multi = subparsers.add_parser("run_multi", help="Run multi-species pipeline from Newick")
     multi.add_argument("--newick-tree", default=None)
@@ -192,6 +198,7 @@ def main():
                 repeat_masker=args.repeat_mask or "windowmasker",
                 repeat_species=args.repeat_species,
                 indel_window=args.indel_window,
+                annotate=args.annotate,
             )
             pipeline.run()
 

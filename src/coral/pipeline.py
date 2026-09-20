@@ -81,8 +81,6 @@ class MutationExtractionPipeline:
                 "Use MultiSpeciesMutationPipeline for more.")
         # Pair mode: one target against the reference (passed as the outgroup)
         self.pair = len(species_list) == 1
-        if self.pair and kwargs.get("annotate", False):
-            raise ValueError("Pair mode has no annotate option")
         self.species_list = species_list  # list of (name, accession)
         self.outgroup = outgroup          # (name, accession)
         self.aligner_name = aligner_name
@@ -383,11 +381,10 @@ class MutationExtractionPipeline:
 
     def extract_annotated(self):
         write_annotated_outputs(
-            pileup_path=self.pileup_path,
-            output_dir=os.path.join(self.output_dir, "Annotated"),
-            reference=self.reference.name,
-            taxon1=self.genomes[0].name,
-            taxon2=self.genomes[1].name,
+            self.pileup_path,
+            os.path.join(self.output_dir, "Annotated"),
+            self.reference.name,
+            *[genome.name for genome in self.genomes],
             ref_mask=self.reference_mask,
             no_cache=self.no_cache,
             verbose=self.verbose,
