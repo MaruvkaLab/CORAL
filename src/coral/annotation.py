@@ -7,11 +7,16 @@ continuity) of a read with '*' or '+' within k bp of the middle base.
 """
 import gzip
 import json
+import multiprocessing
 import os
+import shutil
+import subprocess
+import tempfile
 from collections import defaultdict
 
-from .mutation_extractor_manager import (MutationNormalizer, _write_extractor_outputs, detect_mutation_triplet,
-                                         fold, scan_windows)
+from .mutation_extractor_manager import (MutationNormalizer, _chroms_with_reads, _read_fai_chroms,
+                                         _write_extractor_outputs, detect_mutation_triplet, fold, scan_windows)
+from .pileup_manager import mpileup_cmd
 from .utils import log
 
 ALWAYS_KEPT = 256       # MAPQ given to continuity-rescued reads
@@ -175,13 +180,67 @@ def scan_annotated_pileup(line_iter, on_call=None, ref_mask=None, indel_window=1
     return counts
 
 
-def write_annotated_outputs(pileup_path, output_dir, reference, *taxa,
-                            ref_mask=None, no_cache=False, verbose=True, indel_window=1):
+def _call_writer(calls, names):
+    """on_call that writes one CSV row per call, naming the taxon it belongs to."""
+    def write(chrom, pos, mode, taxon, mutation, lo, hi, repeat, *flag):
+        calls.write(",".join(map(str, (chrom, pos, mode, names[taxon], mutation, lo, hi, repeat) + flag)) + "\n")
+    return write
+
+
+def _annotate_region(task):
+    """One chromosome: pile it up, scan it, and write its calls to their own file.
+    Splitting here is exact -- scan_windows never builds a window across two chromosomes."""
+    chrom, ref_fasta, bams, ref_mask, indel_window, n_species, names, rows_path = task
+    cmd = mpileup_cmd(ref_fasta, bams, region=chrom, annotate=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    with gzip.open(rows_path, 'wt') as calls:
+        counts = scan_annotated_pileup(proc.stdout, on_call=_call_writer(calls, names), ref_mask=ref_mask,
+                                       indel_window=indel_window, n_species=n_species)
+    if proc.wait() != 0:
+        raise RuntimeError(f"mpileup failed on {chrom}")
+    return chrom, dict(counts), rows_path
+
+
+def _scan_in_parallel(calls_tmp, header, ref_fasta, bams, ref_mask, indel_window, names, cores, verbose):
+    """Scan every chromosome with reads in its own process, then write the calls in reference
+    order, so the outputs are the ones a single pass over the whole-genome pileup would give."""
+    chroms = _read_fai_chroms(ref_fasta + ".fai")
+    with_reads = _chroms_with_reads(bams)
+    ordered = [c for c, _ in chroms if c in with_reads]
+    log(f"Scanning the annotated pileup in parallel: {len(ordered)} chromosomes with reads...", verbose)
+
+    counts, results = defaultdict(int), {}
+    with tempfile.TemporaryDirectory(dir=os.path.dirname(calls_tmp) or None) as tmp:
+        # largest first, so the long chromosomes do not start last
+        tasks = [(c, ref_fasta, bams, ref_mask.for_contig(c) if ref_mask else None, indel_window,
+                  len(names) - 1, names, os.path.join(tmp, f"{i}.csv.gz"))
+                 for i, c in enumerate(sorted(ordered, key=dict(chroms).get, reverse=True))]
+        with multiprocessing.Pool(max(1, min(cores, len(tasks)))) as pool:
+            for chrom, chrom_counts, rows_path in pool.imap_unordered(_annotate_region, tasks):
+                for key, n in chrom_counts.items():
+                    counts[key] += n
+                results[chrom] = rows_path
+                log(f"scanned {chrom}", verbose)
+        with gzip.open(calls_tmp, 'wt') as out:
+            out.write(header)
+            for chrom in ordered:
+                with gzip.open(results[chrom], 'rt') as rows:
+                    shutil.copyfileobj(rows, out)
+    return counts
+
+
+def write_annotated_outputs(pileup_path, output_dir, reference, *taxa, ref_mask=None, no_cache=False,
+                            verbose=True, indel_window=1, ref_fasta=None, bams=None, cores=None):
     """Scan an annotated pileup into <reference>__<taxa...>__calls.csv.gz
     (one row per call and continuity mode) and __site_counts.tsv.gz.
 
     One taxon is a pair: the calls hold the change seen from the reference, as in a
-    pair run's mutations.csv.gz, and the site classes are scan_pair's."""
+    pair run's mutations.csv.gz, and the site classes are scan_pair's.
+
+    Given ref_fasta, bams and cores > 1 the whole-genome pileup at pileup_path is never
+    read: each chromosome is piled up and scanned in its own process instead, for the
+    same outputs. A whole-genome scan is single-threaded and, on a 734 Mb reference,
+    hours slower."""
     os.makedirs(output_dir, exist_ok=True)
     stem = os.path.join(output_dir, "__".join((reference,) + taxa))
     calls_path, counts_path = f"{stem}__calls.csv.gz", f"{stem}__site_counts.tsv.gz"
@@ -193,12 +252,15 @@ def write_annotated_outputs(pileup_path, output_dir, reference, *taxa,
     names = (None,) + taxa
     header = (PAIR_CALLS_HEADER if pair else CALLS_HEADER) if indel_window == 1 else \
              (PAIR_CALLS_HEADER_INDEL if pair else CALLS_HEADER_INDEL)
-    with gzip.open(pileup_path, 'rt') as pileup, gzip.open(calls_path + ".tmp", 'wt') as calls:
-        calls.write(header)
-        counts = scan_annotated_pileup(
-            pileup, ref_mask=ref_mask, indel_window=indel_window, n_species=len(taxa),
-            on_call=lambda chrom, pos, mode, taxon, mutation, lo, hi, repeat, *flag:
-                calls.write(",".join(map(str, (chrom, pos, mode, names[taxon], mutation, lo, hi, repeat) + flag)) + "\n"))
+    if ref_fasta and bams and cores and cores > 1:
+        counts = _scan_in_parallel(calls_path + ".tmp", header, ref_fasta, bams, ref_mask,
+                                   indel_window, names, cores, verbose)
+    else:
+        with gzip.open(pileup_path, 'rt') as pileup, gzip.open(calls_path + ".tmp", 'wt') as calls:
+            calls.write(header)
+            counts = scan_annotated_pileup(
+                pileup, on_call=_call_writer(calls, names), ref_mask=ref_mask,
+                indel_window=indel_window, n_species=len(taxa))
     with gzip.open(counts_path + ".tmp", 'wt') as out:
         out.write(COUNTS_HEADER if indel_window == 1 else COUNTS_HEADER_INDEL)
         for key in sorted(counts):

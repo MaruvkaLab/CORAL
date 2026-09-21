@@ -47,6 +47,9 @@ def main():
                       help="A window is not called if its middle base is within K bp of an indel in any kept read. "
                              "1 (default): only the window's own three bases"
                            " (with --annotate, K > 1 is recorded as a flag)")
+    trio.add_argument("--no-cleanup", action="store_true",
+                      help="Keep the raw BAMs, the pileup and the genome folders (FASTA and index) "
+                           "that a run normally deletes at the end")
     trio.add_argument("--annotate", action="store_true",
                         help="Evaluation mode: keep all reads with MAPQ >= --low-mapq, tag each with its "
                              "best overlapping neighbour, and write every call with the MAPQ threshold "
@@ -85,6 +88,9 @@ def main():
                       help="A window is not called if its middle base is within K bp of an indel in any kept read. "
                            "1 (default): only the window's own three bases"
                            " (with --annotate, K > 1 is recorded as a flag)")
+    pair.add_argument("--no-cleanup", action="store_true",
+                      help="Keep the raw BAMs, the pileup and the genome folders (FASTA and index) "
+                           "that a run normally deletes at the end")
     pair.add_argument("--annotate", action="store_true",
                       help="Evaluation mode: keep all reads with MAPQ >= --low-mapq, tag each with its "
                            "best overlapping neighbour, and write every call with the MAPQ threshold "
@@ -175,6 +181,7 @@ def main():
                 repeat_species=args.repeat_species,
                 annotate=args.annotate,
                 indel_window=args.indel_window,
+                no_cleanup=args.no_cleanup,
             )
             pipeline.run()
 
@@ -199,6 +206,7 @@ def main():
                 repeat_species=args.repeat_species,
                 indel_window=args.indel_window,
                 annotate=args.annotate,
+                no_cleanup=args.no_cleanup,
             )
             pipeline.run()
 

@@ -161,7 +161,10 @@ class MutationExtractionPipeline:
             if self.params.get("plots", True):
                 timed_stage("Run Plots", self.run_plots)
         self.genome_stats = self._collect_genome_stats()  # before cleanup removes the FASTAs
-        timed_stage("Cleanup files", self.cleanup)
+        if self.params.get("no_cleanup", False):
+            log("Keeping the raw BAMs, the pileup and the genome folders (--no-cleanup).", self.verbose)
+        else:
+            timed_stage("Cleanup files", self.cleanup)
 
         total_runtime = round(time.time() - start_pipeline, 2)
         timings["Total Runtime"] = total_runtime
@@ -320,9 +323,9 @@ class MutationExtractionPipeline:
         self.pileup = pileup_generator
         self.pileup_path = pileup_generator.pileup_path
 
-        # The scans read the BAMs directly; only the 5-mer pass and annotate mode
-        # still need the whole-genome pileup.
-        if self.params.get("five_mer", False) or self.params.get("annotate", False):
+        # The scans read the BAMs directly; only the 5-mer pass and a single-threaded
+        # annotate run still need the whole-genome pileup.
+        if self.params.get("five_mer", False) or (self.params.get("annotate", False) and not self._parallel_annotate()):
             self.pileup_path = pileup_generator.generate()
         else:
             log("Scanning the BAMs directly: skipping the whole-genome pileup.", self.verbose)
@@ -379,7 +382,13 @@ class MutationExtractionPipeline:
             ref_mask=self.reference_mask,
             indel_window=self.params.get("indel_window", 1)).extract()
 
+    def _parallel_annotate(self):
+        """Annotate mode scans a chromosome per process when it has more than one core.
+        Asked in two places -- the pileup is only generated when this is False."""
+        return (self.params.get("cores") or 1) > 1
+
     def extract_annotated(self):
+        parallel = self._parallel_annotate()
         write_annotated_outputs(
             self.pileup_path,
             os.path.join(self.output_dir, "Annotated"),
@@ -388,7 +397,10 @@ class MutationExtractionPipeline:
             ref_mask=self.reference_mask,
             no_cache=self.no_cache,
             verbose=self.verbose,
-            indel_window=self.params.get("indel_window", 1))
+            indel_window=self.params.get("indel_window", 1),
+            ref_fasta=self.reference.fasta_path if parallel else None,
+            bams=[aligner.final_bam for aligner in self.alignments] if parallel else None,
+            cores=self.params.get("cores"))
 
     def _extract_bam_intervals(self, input_bam, output_dir, assume_sorted=False, merge=False, no_cache=False):
             os.makedirs(output_dir, exist_ok=True)
