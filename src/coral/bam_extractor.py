@@ -366,7 +366,7 @@ class BamPairExtractor:
         if self.indel_window > 1:
             windows['near_indel'] = n_near
         summary = {
-            'pileup_lines': {k: v for k, v in dropped.items() if v} | dict(lines),
+            'pileup_lines': {**{k: v for k, v in dropped.items() if v}, **lines},
             'candidate_windows': windows,
             'site_classes': {k: v for k, v in classes.items() if v},
         }
@@ -626,7 +626,7 @@ class BamTrioExtractor:
         if self.indel_window > 1:
             windows['near_indel'] = n_near
         summary = {
-            'pileup_lines': {k: v for k, v in dropped.items() if v} | dict(lines),
+            'pileup_lines': {**{k: v for k, v in dropped.items() if v}, **lines},
             'candidate_windows': windows,
             'site_classes': {k: v for k, v in classes.items() if v},
         }
