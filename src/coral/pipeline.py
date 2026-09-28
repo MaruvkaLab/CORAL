@@ -198,6 +198,9 @@ class MutationExtractionPipeline:
                 entry["total_bp"] = genome.total_bp
             elif os.path.exists(genome.fasta_path):
                 entry["fasta_bytes"] = os.path.getsize(genome.fasta_path)
+            for key in ("masked_bp", "fragments_written", "fragments_skipped_repeat"):
+                if getattr(genome, key, None) is not None:
+                    entry[key] = getattr(genome, key)
             stats[genome.name] = entry
         return stats
 
@@ -250,6 +253,7 @@ class MutationExtractionPipeline:
         # Normal runs drop calls at outgroup repeats; annotate mode flags them.
         self.reference_mask = self._build_repeat_mask(
             self.reference, force=self.params.get("annotate", False))
+        self.reference.masked_bp = self.reference_mask.n_masked_bases if self.reference_mask else None
 
         # Ingroup genomes
         for name, acc in self.species_list:

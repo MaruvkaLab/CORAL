@@ -20,6 +20,7 @@ class Genome:
         self.verbose = verbose
         self.n_contigs = None   # set when the FASTA is parsed for fragmentation
         self.total_bp = None
+        self.masked_bp = self.fragments_written = self.fragments_skipped_repeat = None
 
     def download(self):
         if os.path.exists(self.fasta_path) and not self.no_cache:
@@ -162,6 +163,8 @@ class Genome:
                     out.write(f"{'I' * len(frag)}\n")
                     written += 1
 
+        self.fragments_written, self.fragments_skipped_repeat = written, skipped
+        self.masked_bp = repeat_mask.n_masked_bases if repeat_mask else None
         if repeat_mask:
             log(f"Wrote {output_fastq} ({written} fragments; {skipped} skipped as "
                 f">={mask_frac:.0%} repeat)", self.verbose)
