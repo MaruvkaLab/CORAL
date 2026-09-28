@@ -412,6 +412,25 @@ def _tally(inv, names, into):
             into[names[i]] = into.get(names[i], 0) + count
 
 
+def _near_counts(ref, base1, base2, mid):
+    """({mutation: n} of taxon 1, of taxon 2, {triplet: n}) at windows dropped for a nearby indel,
+    classed as the kept windows are, so what the indel window removes can be looked at."""
+    mut1, mut2, trip = {}, {}, {}
+    r_p, r_c, r_n = ref[mid - 1], ref[mid], ref[mid + 1]
+    a_c, b_c = base1[mid], base2[mid]
+    flanks = ((r_p == base1[mid - 1]) & (r_p == base2[mid - 1])
+              & (r_n == base1[mid + 1]) & (r_n == base2[mid + 1]))
+    eq1, eq2 = r_c == a_c, r_c == b_c
+    m1, m2 = flanks & ~eq1 & eq2, flanks & eq1 & ~eq2
+    for m, into, other in ((m1, mut1, a_c), (m2, mut2, b_c)):
+        if m.any():
+            _tally(*_keyed((r_p[m], r_c[m], other[m], r_n[m]), lambda p, c, t, nx: f"{p}[{c}>{t}]{nx}"), into)
+    counted = m1 | m2 | (flanks & eq1 & eq2)
+    if counted.any():
+        _tally(*_keyed((r_p[counted], r_c[counted], r_n[counted]), lambda p, c, nx: p + c + nx), trip)
+    return mut1, mut2, trip
+
+
 def _scan_trio_tile(task):
     """Processes one tile for two taxa against the reference: the trio counterpart
     of _scan_pair_tile. mpileup emits a line wherever *either* BAM has reads, so
@@ -466,12 +485,13 @@ def _scan_trio_tile(task):
     edge = [(int(lo + p), bool(c)) for p, c in zip(line_idx[:2].tolist(), line_clean[:2].tolist())]
     tail = [(int(lo + p), bool(c)) for p, c in zip(line_idx[-2:].tolist(), line_clean[-2:].tolist())]
 
-    n_near = 0
+    n_near, near_counts = 0, ({}, {}, {})
     if indel_window > 1 and mid.size:
         events = (del1 | ins1 | del2 | ins2).astype(np.int64)
         cs = np.concatenate(([0], np.cumsum(events)))
         near = (cs[np.minimum(mid + indel_window + 1, n)] - cs[np.maximum(mid - indel_window, 0)]) > 0
         n_near = int(near.sum())
+        near_counts = _near_counts(ref, base1, base2, mid[near])
         mid = mid[~near]
 
     # detect_mutation_triplet, vectorised. It compares characters and has no
@@ -522,7 +542,7 @@ def _scan_trio_tile(task):
         _tally(inv, names, ref_diff)
 
     return (chrom, rows1, rows2, mut1, mut2, trip1, trip2, ref_diff, classes, dropped,
-            lines_after_mask, lines_masked, gaps, edge, tail, int(line_idx.size), n_near)
+            lines_after_mask, lines_masked, gaps, edge, tail, int(line_idx.size), n_near, near_counts)
 
 
 class BamTrioExtractor:
@@ -562,6 +582,7 @@ class BamTrioExtractor:
         self.csv_path2 = None if no_full_mutations else os.path.join(
             mutation_output_dir, f"{taxon2}__{taxon1}__{reference}__mutations.csv.gz")
         self.classes_json = os.path.join(os.path.dirname(mutation_output_dir), "run_summary.json")
+        self.near_json = os.path.join(os.path.dirname(mutation_output_dir), "near_indel.json")
 
     def extract(self):
         os.makedirs(self.mutation_output_dir, exist_ok=True)
@@ -591,6 +612,7 @@ class BamTrioExtractor:
         ref_diff = defaultdict(int)
         classes, dropped, lines = defaultdict(int), defaultdict(int), defaultdict(int)
         n_near = 0
+        near_mut1, near_mut2, near_trip = defaultdict(int), defaultdict(int), defaultdict(int)
         gap_counter = GapCounter()
 
         csv1 = csv2 = None
@@ -603,7 +625,7 @@ class BamTrioExtractor:
             def handle(result):
                 nonlocal n_near
                 (chrom, rows1, rows2, m1, m2, t1, t2, rd, cl, dr,
-                 after_mask, masked_lines, gaps, edge, tail, n_lines, near) = result
+                 after_mask, masked_lines, gaps, edge, tail, n_lines, near, near_counts) = result
                 if csv1 is not None:
                     csv1.write(rows1)
                     csv2.write(rows2)
@@ -614,6 +636,9 @@ class BamTrioExtractor:
                 lines['lines_after_mask'] += after_mask
                 lines['lines_masked'] += masked_lines
                 n_near += near
+                for dst, src in zip((near_mut1, near_mut2, near_trip), near_counts):
+                    for k, v in src.items():
+                        dst[k] += v
                 gap_counter.add(chrom, gaps, edge, tail, n_lines)
 
             run_tiles(tasks, _scan_trio_tile, self.cores, handle)
@@ -633,5 +658,9 @@ class BamTrioExtractor:
         _write_extractor_outputs(dict(mut1), dict(mut2), dict(trip1), dict(trip2),
                                  self.out_json1, self.out_json2, self.trip_out_json1, self.trip_out_json2,
                                  summary=summary, summary_json=self.classes_json, ref_diff=dict(ref_diff))
+        if self.indel_window > 1:
+            with open(self.near_json, "w") as f:
+                json.dump({"indel_window": self.indel_window, "reference": self.reference, "triplets": dict(near_trip),
+                           self.taxon1: dict(near_mut1), self.taxon2: dict(near_mut2)}, f, indent=1)
         log(f"Saved mutation counts to {self.out_json1} and {self.out_json2}", self.verbose)
         log(f"Saved triplet counts to {self.trip_out_json1} and {self.trip_out_json2}", self.verbose)

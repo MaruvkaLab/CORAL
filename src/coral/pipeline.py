@@ -147,7 +147,8 @@ class MutationExtractionPipeline:
             log(f"{stage_name} completed in {timings[stage_name]} seconds", self.verbose)
             log(f"Memory usage: {mem_before} → {mem_after} MB", self.verbose)
 
-        timed_stage("Download and Fragment Genomes", self.download_index_and_fragment_genomes)
+        timed_stage("Download Genomes", self.download_genomes)
+        timed_stage("Index and Fragment Genomes", self.download_index_and_fragment_genomes)
         timed_stage("Align Species", self.align_species)
         timed_stage("Generate Pileup", self.generate_pileup)
         if self.params.get("annotate", False):
@@ -238,17 +239,22 @@ class MutationExtractionPipeline:
         os.replace(tmp, path)
         log(f"Run summary saved to: {path}", self.verbose)
 
-    def download_index_and_fragment_genomes(self):
-        # Reference genome (outgroup)
-        ref_name, ref_acc = self.outgroup
-        self.reference = Genome(
-            name=ref_name,
-            accession=ref_acc,
-            output_dir=self.output_dir,
-            no_cache=self.no_cache,
-            verbose=self.verbose
-        )
+    def download_genomes(self):
+        """The reference (outgroup) and the ingroup genomes, downloaded first so the download is timed on its own."""
+        self.reference = Genome(name=self.outgroup[0], accession=self.outgroup[1], output_dir=self.output_dir,
+                                no_cache=self.no_cache, verbose=self.verbose)
         self.reference.download()
+        self.downloaded = []
+        for name, acc in self.species_list:
+            genome = Genome(name=name, accession=acc, output_dir=self.output_dir,
+                            no_cache=self.no_cache, verbose=self.verbose)
+            genome.download()
+            self.downloaded.append(genome)
+
+    def download_index_and_fragment_genomes(self):
+        if not hasattr(self, "downloaded"):     # called on its own, not through run()
+            self.download_genomes()
+        # Reference genome (outgroup)
         self.reference.index(aligner=self.aligner_name)
         # Normal runs drop calls at outgroup repeats; annotate mode flags them.
         self.reference_mask = self._build_repeat_mask(
@@ -256,15 +262,7 @@ class MutationExtractionPipeline:
         self.reference.masked_bp = self.reference_mask.n_masked_bases if self.reference_mask else None
 
         # Ingroup genomes
-        for name, acc in self.species_list:
-            genome = Genome(
-                name=name,
-                accession=acc,
-                output_dir=self.output_dir,
-                no_cache=self.no_cache,
-                verbose=self.verbose
-            )
-            genome.download()
+        for genome in self.downloaded:
             # No pseudo-reads from species repeats.
             species_mask = self._build_repeat_mask(genome)
             genome.generate_fragment_fastq(
