@@ -1,4 +1,5 @@
 import os
+import glob
 import gzip
 import json
 import re
@@ -862,6 +863,36 @@ class TripletExtractor:
             json.dump(triplet_dict2, f, indent=2)
 
         log(f"Triplet dictionaries written to:\n  • {self.out_json1}\n  • {self.out_json2}", self.verbose)
+
+
+class PairNormalizer:
+    """Pair mode: a difference has no known ancestral base, so a class L[a-b]R is normalized by the
+    callable windows holding either allele, LaR or LbR, on either strand. The result therefore does
+    not depend on which genome is the reference."""
+
+    def __init__(self, input_dir, verbose=True):
+        self.input_dir = input_dir
+        self.verbose = verbose
+
+    def normalize(self):
+        tables = os.path.join(self.input_dir, "Tables")
+        os.makedirs(tables, exist_ok=True)
+        for path in glob.glob(os.path.join(self.input_dir, "Mutations", "*__mutations.json")):
+            name = os.path.basename(path)[:-len("__mutations.json")]
+            with open(path) as f:
+                counts = json.load(f)
+            with open(os.path.join(self.input_dir, "Triplets", f"{name}__triplets.json")) as f:
+                triplets = json.load(f)
+            rows = []
+            for label, count in sorted(counts.items()):
+                alleles = {label[0] + label[2] + label[6], label[0] + label[4] + label[6]}
+                opportunity = sum(triplets.get(t, 0) for t in alleles | {reverse_complement(t) for t in alleles})
+                rows.append((label, count, opportunity, count / opportunity if opportunity else 0))
+            table = pd.DataFrame(rows, columns=["label", "count", "opportunity", "rate"])
+            table["normalized"] = table["rate"] / table["rate"].sum() * 10000
+            out = os.path.join(tables, f"{name}__normalized.tsv")
+            table.to_csv(out, sep="\t", index=False)
+            log(f"Normalized pair spectrum written to {out}", self.verbose)
 
 
 class MutationNormalizer:

@@ -16,7 +16,7 @@ from .genome_manager import Genome
 from .alignment_manager import Aligner
 from .bam_extractor import BamPairExtractor, BamTrioExtractor
 from .multiple_species_mutation_extractor_manager import MultipleSpeciesMutationExtractor
-from .mutation_extractor_manager import FiveMerExtractor, MutationNormalizer, TripletExtractor
+from .mutation_extractor_manager import FiveMerExtractor, MutationNormalizer, PairNormalizer, TripletExtractor
 from .pileup_manager import Pileup
 from .plot_utils import CoveragePlotter, MutationDensityPlotter, MutationSpectraPlotter
 from .utils import get_top_n_chromosomes, log
@@ -383,6 +383,7 @@ class MutationExtractionPipeline:
             verbose=self.verbose,
             ref_mask=self.reference_mask,
             indel_window=self.params.get("indel_window", 1)).extract()
+        PairNormalizer(self.output_dir, verbose=self.verbose).normalize()
 
     def _parallel_annotate(self):
         """Annotate mode scans a chromosome per process when it has more than one core.
