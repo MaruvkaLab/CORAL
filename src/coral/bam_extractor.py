@@ -238,19 +238,16 @@ def _scan_pair_tile(task):
             zip(line_idx[-2:].tolist(), line_clean[-2:].tolist())]
 
     # Drop calls sitting within 'indel_window' bases of an indel. 
-    n_near = 0
+    n_near, near_counts = 0, ({}, {})
     if indel_window > 1 and mid.size:
-        cs = np.concatenate(([0], np.cumsum((deleted | inserted).astype(np.int64))))
-        left = np.maximum(mid - indel_window, 0)
-        right = np.minimum(mid + indel_window + 1, n)
-        near = (cs[right] - cs[left]) > 0
+        near = _near_indel(deleted | inserted, mid, indel_window)
         n_near = int(near.sum())
+        near_counts = _pair_near_counts(ref, base, mid[near])
         mid = mid[~near]
 
     rc, tc = _CODE[ref], _CODE[base]
     # Checks all bases are A/C/G/T, the flanks are identical, and whether the middle differs (mutation).
-    acgt = ((rc[mid - 1] < 4) & (rc[mid] < 4) & (rc[mid + 1] < 4)
-            & (tc[mid - 1] < 4) & (tc[mid] < 4) & (tc[mid + 1] < 4))
+    acgt = _acgt((ref, base), mid, (-1, 0, 1))
     flanks = (rc[mid - 1] == tc[mid - 1]) & (rc[mid + 1] == tc[mid + 1])
     same = rc[mid] == tc[mid]
     called = acgt & flanks & ~same
@@ -281,7 +278,7 @@ def _scan_pair_tile(task):
                        for p, i in zip(d.tolist(), pair.tolist()))
 
     return (chrom, rows, muts, trips, classes, dropped, lines_after_mask, lines_masked,
-            gaps, edge, tail, int(line_idx.size), n_near)
+            gaps, edge, tail, int(line_idx.size), n_near, near_counts)
 
 
 class BamPairExtractor:
@@ -311,6 +308,7 @@ class BamPairExtractor:
         self.csv_path = os.path.join(mutation_output_dir, f"{target}__{reference}__mutations.csv.gz")
         self.trip_out_json = os.path.join(triplet_output_dir, f"{target}__{reference}__triplets.json")
         self.classes_json = os.path.join(os.path.dirname(mutation_output_dir), "run_summary.json")
+        self.near_json = os.path.join(os.path.dirname(mutation_output_dir), "near_indel.json")
 
     def extract(self):
         os.makedirs(self.mutation_output_dir, exist_ok=True)
@@ -342,6 +340,7 @@ class BamPairExtractor:
         dropped = defaultdict(int)
         lines = defaultdict(int)
         n_near = 0
+        near_muts, near_trips = defaultdict(int), defaultdict(int)
         gap_counter = GapCounter()
 
         with gzip.open(self.csv_path, 'wt') as csv:
@@ -350,7 +349,7 @@ class BamPairExtractor:
             def handle(result):
                 nonlocal n_near
                 (chrom, rows, m, t, cl, dr, after_mask, masked_lines,
-                 gaps, edge, tail, n_lines, near) = result
+                 gaps, edge, tail, n_lines, near, near_counts) = result
                 csv.write(rows)
                 for dst, src in ((muts, m), (trips, t), (classes, cl), (dropped, dr)):
                     for k, v in src.items():
@@ -358,6 +357,9 @@ class BamPairExtractor:
                 lines['lines_after_mask'] += after_mask
                 lines['lines_masked'] += masked_lines
                 n_near += near
+                for dst, src in zip((near_muts, near_trips), near_counts):
+                    for k, v in src.items():
+                        dst[k] += v
                 gap_counter.add(chrom, gaps, edge, tail, n_lines)
 
             run_tiles(tasks, _scan_pair_tile, self.cores, handle)
@@ -377,6 +379,10 @@ class BamPairExtractor:
             json.dump(dict(trips), f, indent=2)
         with open(self.classes_json, 'w') as f:
             json.dump({section: dict(counts) for section, counts in summary.items()}, f, indent=2)
+        if self.indel_window > 1:
+            with open(self.near_json, "w") as f:
+                json.dump({"indel_window": self.indel_window, "reference": self.reference, "target": self.target,
+                           "triplets": dict(near_trips), "mutations": dict(near_muts)}, f, indent=1)
         log(f"Saved mutation counts to {self.out_json} and triplet counts to {self.trip_out_json}", self.verbose)
 
 
@@ -395,7 +401,7 @@ def _keyed(cols, fmt):
     """(inverse index, names) for parallel uint8 columns: only the distinct byte
     combinations become strings -- a few dozen, against millions of rows. Unlike
     pair mode this keeps raw bytes, because the trio scan compares characters and
-    never checks for ACGT, so an N has to survive into the key."""
+    checks for ACGT only through _CODE, before the keys are made."""
     key = np.zeros(len(cols[0]), np.int64)
     for col in cols:
         key = (key << 8) | col.astype(np.int64)
@@ -412,10 +418,43 @@ def _tally(inv, names, into):
             into[names[i]] = into.get(names[i], 0) + count
 
 
+def _pair_near_counts(ref, base, mid):
+    """({mutation: n}, {triplet: n}) at windows dropped for a nearby indel, classed as pair mode classes
+    the kept windows, so what the indel window removes can be looked at (the trio has _near_counts)."""
+    mid = mid[_acgt((ref, base), mid, (-1, 0, 1))]
+    rc, tc = _CODE[ref], _CODE[base]
+    kept = mid[(rc[mid - 1] == tc[mid - 1]) & (rc[mid + 1] == tc[mid + 1])]
+    code3 = lambda c, p: (c[p - 1].astype(np.int64) << 4) | (c[p].astype(np.int64) << 2) | c[p + 1]
+    trips = {_TRIPLET[k]: v for k, v in enumerate(np.bincount(code3(rc, kept), minlength=64).tolist()) if v}
+    d = kept[rc[kept] != tc[kept]]
+    muts = {}
+    for idx, v in enumerate(np.bincount(_PAIR_IDX[code3(rc, d) * 64 + code3(tc, d)], minlength=len(_CHANGE)).tolist()):
+        if v:
+            muts[_MUTATION[idx]] = muts.get(_MUTATION[idx], 0) + v
+    return muts, trips
+
+
+def _near_indel(events, mid, indel_window):
+    """Windows whose middle is within indel_window bases of an indel event (a deletion or an insertion)."""
+    cs = np.concatenate(([0], np.cumsum(events.astype(np.int64))))
+    return (cs[np.minimum(mid + indel_window + 1, len(events))] - cs[np.maximum(mid - indel_window, 0)]) > 0
+
+
+def _acgt(arrays, mid, offsets):
+    """Windows whose bases at mid + each offset are A/C/G/T in every array."""
+    ok = np.ones(len(mid), bool)
+    for x in arrays:
+        c = _CODE[x]
+        for d in offsets:
+            ok &= c[mid + d] < 4
+    return ok
+
+
 def _near_counts(ref, base1, base2, mid):
     """({mutation: n} of taxon 1, of taxon 2, {triplet: n}) at windows dropped for a nearby indel,
     classed as the kept windows are, so what the indel window removes can be looked at."""
     mut1, mut2, trip = {}, {}, {}
+    mid = mid[_acgt((ref, base1, base2), mid, (-1, 0, 1))]
     r_p, r_c, r_n = ref[mid - 1], ref[mid], ref[mid + 1]
     a_c, b_c = base1[mid], base2[mid]
     flanks = ((r_p == base1[mid - 1]) & (r_p == base2[mid - 1])
@@ -432,11 +471,13 @@ def _near_counts(ref, base1, base2, mid):
 
 
 def _five_counts(ref, base1, base2, clean, mid):
-    """5-mer counterpart of the trio counts at the kept windows: ({mutation: n} of taxon 1, of taxon 2,
-    {5-mer: n} opportunity), where the two bases on each side are clean and equal in all three."""
+    """5-mer counterpart of the trio counts: ({mutation: n} of taxon 1, of taxon 2, {5-mer: n} opportunity).
+    mid are the kept windows (the middle three bases clean, A/C/G/T and away from indels); of these, those
+    whose outer two bases are also clean and A/C/G/T, and whose four flanking bases agree in all three."""
     n = len(ref)
     mid = mid[(mid >= 2) & (mid < n - 2)]
     mid = mid[clean[mid - 2] & clean[mid + 2]]
+    mid = mid[_acgt((ref, base1, base2), mid, (-2, 2))]
     ok = np.ones(len(mid), bool)
     for d in (-2, -1, 1, 2):
         ok &= (ref[mid + d] == base1[mid + d]) & (ref[mid + d] == base2[mid + d])
@@ -512,12 +553,15 @@ def _scan_trio_tile(task):
 
     n_near, near_counts = 0, ({}, {}, {})
     if indel_window > 1 and mid.size:
-        events = (del1 | ins1 | del2 | ins2).astype(np.int64)
-        cs = np.concatenate(([0], np.cumsum(events)))
-        near = (cs[np.minimum(mid + indel_window + 1, n)] - cs[np.maximum(mid - indel_window, 0)]) > 0
+        near = _near_indel(del1 | ins1 | del2 | ins2, mid, indel_window)
         n_near = int(near.sum())
         near_counts = _near_counts(ref, base1, base2, mid[near])
         mid = mid[~near]
+
+    # As in pair mode: every base of the window, in the reference and both taxa, is A/C/G/T.
+    acgt = _acgt((ref, base1, base2), mid, (-1, 0, 1))
+    n_not_acgt = int((~acgt).sum())
+    mid = mid[acgt]
     if five_mer:
         return _five_counts(ref, base1, base2, clean, mid)
 
@@ -533,7 +577,7 @@ def _scan_trio_tile(task):
            'identical': flanks & eq1 & eq2,
            'ref_differs': flanks & ~eq1 & ~eq2 & eq12,
            'all_differ': flanks & ~eq1 & ~eq2 & ~eq12}
-    classes = {'flanks_not_conserved': int((~flanks).sum())}
+    classes = {'not_acgt': n_not_acgt, 'flanks_not_conserved': int((~flanks).sum())}
     classes.update({name: int(m.sum()) for name, m in sel.items()})
 
     mut1, mut2, trip1, trip2, ref_diff = {}, {}, {}, {}, {}
