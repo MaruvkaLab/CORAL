@@ -137,10 +137,10 @@ def tile_spans(fai_path, bams, tile_bp):
             for start in range(0, length, tile_bp)]
 
 
-def tile_scan_span(lo, hi, length, indel_window):
+def tile_scan_span(lo, hi, length, indel_window, five_mer=False):
     """Computes the 0-based half-open span a tile must scan: its own [lo, hi) plus enough 
     padding for every middle base's flanks and indel neighbourhood, clipped to the contig."""
-    pad = max(1, indel_window)
+    pad = max(2 if five_mer else 1, indel_window)      # 2: a 5-mer's outer bases
     return max(0, lo - pad), min(length, hi + pad)
 
 
@@ -431,12 +431,37 @@ def _near_counts(ref, base1, base2, mid):
     return mut1, mut2, trip
 
 
+def _five_counts(ref, base1, base2, clean, mid):
+    """5-mer counterpart of the trio counts at the kept windows: ({mutation: n} of taxon 1, of taxon 2,
+    {5-mer: n} opportunity), where the two bases on each side are clean and equal in all three."""
+    n = len(ref)
+    mid = mid[(mid >= 2) & (mid < n - 2)]
+    mid = mid[clean[mid - 2] & clean[mid + 2]]
+    ok = np.ones(len(mid), bool)
+    for d in (-2, -1, 1, 2):
+        ok &= (ref[mid + d] == base1[mid + d]) & (ref[mid + d] == base2[mid + d])
+    mid = mid[ok]
+    r = [ref[mid + d] for d in (-2, -1, 0, 1, 2)]
+    a_c, b_c = base1[mid], base2[mid]
+    eq1, eq2 = r[2] == a_c, r[2] == b_c
+    m1, m2 = ~eq1 & eq2, eq1 & ~eq2
+    mut1, mut2, opp = {}, {}, {}
+    for m, into, other in ((m1, mut1, a_c), (m2, mut2, b_c)):
+        if m.any():
+            _tally(*_keyed((r[0][m], r[1][m], r[2][m], other[m], r[3][m], r[4][m]),
+                           lambda a, b, c, t, d, e: f"{a}{b}[{c}>{t}]{d}{e}"), into)
+    counted = m1 | m2 | (eq1 & eq2)
+    if counted.any():
+        _tally(*_keyed(tuple(x[counted] for x in r), lambda *x: "".join(x)), opp)
+    return mut1, mut2, opp
+
+
 def _scan_trio_tile(task):
     """Processes one tile for two taxa against the reference: the trio counterpart
     of _scan_pair_tile. mpileup emits a line wherever *either* BAM has reads, so
     no_depth is a real dropped reason here, unlike in pair mode."""
-    bam1, bam2, fasta_path, chrom, lo, hi, length, ref_mask, indel_window, no_rows = task
-    a, b = tile_scan_span(lo, hi, length, indel_window)
+    bam1, bam2, fasta_path, chrom, lo, hi, length, ref_mask, indel_window, no_rows, five_mer = task
+    a, b = tile_scan_span(lo, hi, length, indel_window, five_mer)
     n = b - a
 
     ref = np.frombuffer(_opened('fasta', fasta_path).fetch(chrom, a, b).upper().encode(), np.uint8)
@@ -493,6 +518,8 @@ def _scan_trio_tile(task):
         n_near = int(near.sum())
         near_counts = _near_counts(ref, base1, base2, mid[near])
         mid = mid[~near]
+    if five_mer:
+        return _five_counts(ref, base1, base2, clean, mid)
 
     # detect_mutation_triplet, vectorised. It compares characters and has no
     # not_acgt class, so these stay raw bytes rather than the ACGT codes pair uses.
@@ -557,7 +584,8 @@ class BamTrioExtractor:
 
     def __init__(self, reference, taxon1, taxon2, ref_fasta, bams, mutation_output_dir,
                  triplet_output_dir, cores=None, no_full_mutations=False, no_cache=False,
-                 verbose=True, ref_mask=None, indel_window=1, tile_bp=1_000_000):
+                 verbose=True, ref_mask=None, indel_window=1, tile_bp=1_000_000, five_mer=False):
+        self.five_mer = five_mer          # a separate pass that only counts 5-mers
         self.reference = reference
         self.taxon1 = taxon1
         self.taxon2 = taxon2
@@ -583,13 +611,14 @@ class BamTrioExtractor:
             mutation_output_dir, f"{taxon2}__{taxon1}__{reference}__mutations.csv.gz")
         self.classes_json = os.path.join(os.path.dirname(mutation_output_dir), "run_summary.json")
         self.near_json = os.path.join(os.path.dirname(mutation_output_dir), "near_indel.json")
+        self.five_dir = os.path.join(os.path.dirname(mutation_output_dir), "Five_mers")
 
     def extract(self):
         os.makedirs(self.mutation_output_dir, exist_ok=True)
         os.makedirs(self.triplet_output_dir, exist_ok=True)
         jsons = [self.out_json1, self.out_json2, self.trip_out_json1, self.trip_out_json2]
         csvs = [] if self.no_full_mutations else [self.csv_path1, self.csv_path2]
-        if not self.no_cache and all(os.path.exists(p) for p in jsons + csvs + [self.classes_json]):
+        if not self.no_cache and not self.five_mer and all(os.path.exists(p) for p in jsons + csvs + [self.classes_json]):
             log("Mutation counts already exist. Skipping.", self.verbose)
             return
 
@@ -598,14 +627,31 @@ class BamTrioExtractor:
         def tile_mask(chrom, lo, hi, length):
             if not self.ref_mask:
                 return None
-            a, b = tile_scan_span(lo, hi, length, self.indel_window)
+            a, b = tile_scan_span(lo, hi, length, self.indel_window, self.five_mer)
             sub = self.ref_mask.for_span(chrom, a + 1, b)   # the mask is 1-based inclusive
             return sub if sub else None
 
         tasks = [(self.bams[0], self.bams[1], self.ref_fasta, chrom, lo, hi, length,
-                  tile_mask(chrom, lo, hi, length), self.indel_window, self.no_full_mutations)
+                  tile_mask(chrom, lo, hi, length), self.indel_window, self.no_full_mutations, self.five_mer)
                  for chrom, lo, hi, length in spans]
         log(f"Scanning the BAMs directly: {len(tasks)} tiles of {self.tile_bp:,} bp...", self.verbose)
+        if self.five_mer:
+            five = [defaultdict(int), defaultdict(int), defaultdict(int)]
+
+            def add(result):
+                for dst, src in zip(five, result):
+                    for k, v in src.items():
+                        dst[k] += v
+
+            run_tiles(tasks, _scan_trio_tile, self.cores, add)
+            os.makedirs(self.five_dir, exist_ok=True)
+            t1, t2, ref = self.taxon1, self.taxon2, self.reference
+            for name, counts in ((f"{t1}__{t2}__{ref}__5mers.json", five[0]), (f"{t2}__{t1}__{ref}__5mers.json", five[1]),
+                                 (f"{t1}__{t2}__{ref}__5mer_opportunity.json", five[2])):
+                with open(os.path.join(self.five_dir, name), "w") as f:
+                    json.dump(dict(counts), f, indent=1)
+            log(f"Saved 5-mer counts to {self.five_dir}", self.verbose)
+            return
 
         mut1, mut2 = defaultdict(int), defaultdict(int)
         trip1, trip2 = defaultdict(int), defaultdict(int)

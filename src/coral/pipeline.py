@@ -16,7 +16,7 @@ from .genome_manager import Genome
 from .alignment_manager import Aligner
 from .bam_extractor import BamPairExtractor, BamTrioExtractor
 from .multiple_species_mutation_extractor_manager import MultipleSpeciesMutationExtractor
-from .mutation_extractor_manager import FiveMerExtractor, MutationNormalizer, PairNormalizer, TripletExtractor
+from .mutation_extractor_manager import MutationNormalizer, PairNormalizer, TripletExtractor
 from .pileup_manager import Pileup
 from .plot_utils import CoveragePlotter, MutationDensityPlotter, MutationSpectraPlotter
 from .utils import get_top_n_chromosomes, log
@@ -59,6 +59,13 @@ def _tool_versions():
     try:
         from importlib.metadata import version
         versions["coral"] = version("coral")
+    except Exception:
+        pass
+    try:   # the exact code, when CORAL runs from a git checkout
+        r = subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(__file__)), "describe", "--always", "--dirty"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            versions["coral_commit"] = r.stdout.strip()
     except Exception:
         pass
     return versions
@@ -158,6 +165,8 @@ class MutationExtractionPipeline:
             timed_stage("Extract Intervals", self.extract_intervals)
         else:
             timed_stage("Extract Mutations and Triplets", self.extract_mutations_and_triplets)
+            if self.params.get("five_mer", False):      # opt-in (--five-mer), timed on its own
+                timed_stage("Extract 5-mers", self.extract_five_mers)
             timed_stage("Extract Intervals", self.extract_intervals)
             if self.params.get("plots", True):
                 timed_stage("Run Plots", self.run_plots)
@@ -325,9 +334,9 @@ class MutationExtractionPipeline:
         self.pileup = pileup_generator
         self.pileup_path = pileup_generator.pileup_path
 
-        # The scans read the BAMs directly; only the 5-mer pass and a single-threaded
-        # annotate run still need the whole-genome pileup.
-        if self.params.get("five_mer", False) or (self.params.get("annotate", False) and not self._parallel_annotate()):
+        # The scans read the BAMs directly; only a single-threaded annotate run still
+        # needs the whole-genome pileup.
+        if self.params.get("annotate", False) and not self._parallel_annotate():
             self.pileup_path = pileup_generator.generate()
         else:
             log("Scanning the BAMs directly: skipping the whole-genome pileup.", self.verbose)
@@ -351,17 +360,6 @@ class MutationExtractionPipeline:
             ref_mask=self.reference_mask,
             indel_window=self.params.get("indel_window", 1)).extract()
 
-        # 5-mers are opt-in (--five-mer): an extra pass not used by the standard outputs
-        if self.params.get("five_mer", False):
-            fivemer_extractor = FiveMerExtractor(reference=self.reference.name,
-                                  taxon1=self.genomes[0].name,
-                                  taxon2=self.genomes[1].name,
-                                  pileup_file=self.pileup_path,
-                                  output_dir=os.path.join(self.output_dir, 'Mutations'),
-                                  no_cache=self.no_cache,
-                                  verbose=self.verbose)
-            fivemer_extractor.extract()
-
         normalizer = MutationNormalizer(
             input_dir=self.output_dir,
             output_dir= os.path.join(self.output_dir, "Tables"),
@@ -384,6 +382,16 @@ class MutationExtractionPipeline:
             ref_mask=self.reference_mask,
             indel_window=self.params.get("indel_window", 1)).extract()
         PairNormalizer(self.output_dir, verbose=self.verbose).normalize()
+
+    def extract_five_mers(self):
+        """Five_mers/: the trio's mutations and opportunity by 5-mer, a second scan of the BAMs with the same filters."""
+        BamTrioExtractor(
+            reference=self.reference.name, taxon1=self.genomes[0].name, taxon2=self.genomes[1].name,
+            ref_fasta=self.reference.fasta_path, bams=[aligner.final_bam for aligner in self.alignments],
+            mutation_output_dir=os.path.join(self.output_dir, 'Mutations'),
+            triplet_output_dir=os.path.join(self.output_dir, 'Triplets'),
+            cores=self.params.get("cores"), no_cache=self.no_cache, verbose=self.verbose,
+            ref_mask=self.reference_mask, indel_window=self.params.get("indel_window", 1), five_mer=True).extract()
 
     def _parallel_annotate(self):
         """Annotate mode scans a chromosome per process when it has more than one core.
