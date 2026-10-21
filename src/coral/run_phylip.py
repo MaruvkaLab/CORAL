@@ -137,7 +137,7 @@ def run_phylip_command(df, output_dir, exe_path, tree=None, prefix="run1", phyli
 
 
 
-def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, mapping, verbose=True):
+def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, mapping, verbose=True, no_cache=False):
     from ete3 import Tree
     df = load_random_rows(df_path, verbose=verbose).astype(str)
     # df = pd.read_csv(df_path, index_col=0).astype(str)
@@ -156,16 +156,24 @@ def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, ma
     no_tree_dir = os.path.join(output_dir, f"{prefix}_no_tree")
     tree_dir = os.path.join(output_dir, f"{prefix}_with_tree")
 
-    log(f"Running PHYLIP {command} without a starting tree...", verbose)
-    default_output = run_phylip_command(
-        df,
-        output_dir=no_tree_dir,
-        exe_path=exe_path,
-        tree=None,
-        prefix=prefix,
-        phylip_input_args=input_string,
-        verbose=verbose
-    )
+    # Skip if exists and caching allowed. run_phylip_command only renames
+    # outfile/outtree to <prefix>.* after PHYLIP exits 0.
+    cached = {"outfile": os.path.join(no_tree_dir, f"{prefix}.outfile"),
+              "outtree": os.path.join(no_tree_dir, f"{prefix}.outtree")}
+    if os.path.exists(cached["outfile"]) and os.path.exists(cached["outtree"]) and not no_cache:
+        log(f"PHYLIP outputs without a starting tree already exist in {no_tree_dir}. Skipping.", verbose)
+        default_output = {k: os.path.abspath(p) for k, p in cached.items()}
+    else:
+        log(f"Running PHYLIP {command} without a starting tree...", verbose)
+        default_output = run_phylip_command(
+            df,
+            output_dir=no_tree_dir,
+            exe_path=exe_path,
+            tree=None,
+            prefix=prefix,
+            phylip_input_args=input_string,
+            verbose=verbose
+        )
     log(f"PHYLIP outputs (no tree): {default_output}", verbose)
 
     if tree_path:

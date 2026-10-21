@@ -87,6 +87,7 @@ def main():
     phylip.add_argument("--phylip-command", dest="phylip_command", default="dnapars", help="PHYLIP command: dnapars, dnapenny, etc.")
     phylip.add_argument("--prefix", default="phylip_run")
     phylip.add_argument("--input-string", default="Y\n")
+    phylip.add_argument("--no-cache", action="store_true")
     verbose_group_phylip = phylip.add_mutually_exclusive_group()
     verbose_group_phylip.add_argument("--verbose", dest="verbose", action="store_true", help="Enable verbose logging (default: enabled)")
     verbose_group_phylip.add_argument("--quiet", dest="verbose", action="store_false", help="Disable verbose logging")
@@ -155,7 +156,8 @@ def main():
                 prefix=args.prefix,
                 input_string=args.input_string,
                 mapping=mapping,
-                verbose=args.verbose
+                verbose=args.verbose,
+                no_cache=args.no_cache
             )
 
         else:
