@@ -151,13 +151,11 @@ def test_truncated_raw_bam_is_set_aside(tmp_path, monkeypatch):
     aligner = A()
     aligner.raw_bam, aligner.final_bam, aligner.fastq = str(raw), str(final), str(fastq)
 
-    monkeypatch.setattr(split_jobs.subprocess, "run",
-                        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="2\n"))
+    monkeypatch.setattr(split_jobs.pysam, "view", lambda *a: "2\n")
     split_jobs._check_raw_bam(aligner, 1)
     assert raw.exists()
 
-    monkeypatch.setattr(split_jobs.subprocess, "run",
-                        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="1\n"))
+    monkeypatch.setattr(split_jobs.pysam, "view", lambda *a: "1\n")
     with pytest.raises(RuntimeError, match="did not finish"):
         split_jobs._check_raw_bam(aligner, 1)
     assert not raw.exists() and (tmp_path / "x_raw.bam.incomplete").exists()
