@@ -125,6 +125,41 @@ Setting a stage to `1`, or passing `--cores 1`, restores that stage's original
 serial path. `--align-jobs`, `--scan-jobs` and `--fitch-jobs` divide the
 `--cores` budget and cannot exceed it.
 
+#### On an HTCondor cluster: `--split-jobs`
+
+With many species the alignment dominates the run time. Adding `--split-jobs`
+to the same `run_multi` command submits the run as an HTCondor DAG instead of
+running it in place:
+
+```
+prepare        downloads and indexes the outgroup
+align_NNNN     one job per ingroup species: download, fragment, align
+main           the ordinary run_multi; every alignment is cached, so it goes
+               straight on to the scan, PHYLIP and Fitch
+```
+
+Run the command where `condor_submit_dag` works (e.g. a submit/login node),
+from the environment the jobs should use: `PATH` and `PYTHONPATH` are copied
+into the jobs. The output directory must be on a filesystem shared with the
+execute nodes; no file-transfer commands are used.
+
+```bash
+--split-jobs              # submit as a DAG
+--job-cores N             # request_cpus per alignment job (default 4)
+--job-memory-mb N         # request_memory per alignment job (default 8000)
+--job-extra LINE          # extra submit line for the alignment jobs (repeatable)
+--main-job-cores N        # request_cpus of the final job (default 2 x --cores)
+--main-job-memory-mb N    # request_memory of the final job
+--main-job-extra LINE     # extra submit line for the final job (repeatable)
+--job-max-concurrent N    # alignment jobs running at once (default 20; 0 = no limit)
+--job-log-dir DIR         # job logs (default <output>/<run-id>/split_jobs/logs)
+--no-submit               # only write the files
+```
+
+The DAG and submit files are written to `<output>/<run-id>/split_jobs/`. If
+some jobs fail, run the same command again: finished genomes and alignments are
+reused. `--split-jobs` cannot be combined with `--no-cache`.
+
 **Note:** Multi-species mode is experimental and intended for exploratory analyses.
 
 **Note:** Parallel stages use the `spawn` start method, which re-imports

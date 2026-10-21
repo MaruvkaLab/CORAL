@@ -79,6 +79,44 @@ def main():
                        help="Memory budget for the whole run. Caps the worker count of "
                             "each stage.")
 
+    # --- split jobs: one HTCondor job per species for the alignment (see split_jobs.py) ---
+    split = multi.add_argument_group(
+        "split jobs (HTCondor)",
+        "Off unless --split-jobs is given. Submits the run as a DAG: one job downloads and "
+        "indexes the outgroup, one job per ingroup species downloads, fragments and aligns "
+        "it, and a final job runs the rest of run_multi on the cached alignments. The output "
+        "directory must be on a filesystem the execute nodes share.")
+    split.add_argument("--split-jobs", action="store_true",
+                       help="Submit the run as an HTCondor DAG instead of running it here.")
+    split.add_argument("--job-cores", type=int, default=4,
+                       help="request_cpus of each alignment job; the aligner and sort get "
+                            "one thread less (default: 4).")
+    split.add_argument("--job-memory-mb", type=int, default=8000,
+                       help="request_memory of each alignment job and of the outgroup job "
+                            "(default: 8000).")
+    split.add_argument("--job-extra", action="append", default=None, metavar="LINE",
+                       help="Extra submit-description line for the alignment and outgroup "
+                            "jobs, e.g. 'request_disk = 20G'. Repeatable; written last, so "
+                            "it overrides the defaults.")
+    split.add_argument("--main-job-cores", type=int, default=None,
+                       help="request_cpus of the final job (default: 2 x --cores).")
+    split.add_argument("--main-job-memory-mb", type=int, default=None,
+                       help="request_memory of the final job (default: --max-memory-mb, "
+                            "else 16384).")
+    split.add_argument("--main-job-extra", action="append", default=None, metavar="LINE",
+                       help="Extra submit-description line for the final job. Repeatable.")
+    split.add_argument("--job-max-concurrent", type=int, default=20,
+                       help="Alignment jobs DAGMan runs at once; 0 for no limit (default: 20).")
+    split.add_argument("--job-log-dir", default=None,
+                       help="Directory for the jobs' .log/.out/.err "
+                            "(default: <output>/<run-id>/split_jobs/logs).")
+    split.add_argument("--no-submit", action="store_true",
+                       help="Write the DAG and submit files but do not submit them.")
+    # Set by the generated jobs themselves, not by users.
+    split.add_argument("--split-stage", choices=["prepare", "align", "main"], default=None,
+                       help=argparse.SUPPRESS)
+    split.add_argument("--split-index", type=int, default=None, help=argparse.SUPPRESS)
+
     # === Run PHYLIP ===
     phylip = subparsers.add_parser("run_phylip", help="Run PHYLIP on mutation matrix")
     phylip.add_argument("--df", required=True, help="Path to matching_bases.csv.gz")
@@ -142,7 +180,11 @@ def main():
                 fitch_jobs=args.fitch_jobs,
                 max_memory_mb=args.max_memory_mb,
             )
-            pipeline.run()
+            if args.split_jobs or args.split_stage:
+                from .split_jobs import dispatch
+                dispatch(pipeline, args, sys.argv[1:])
+            else:
+                pipeline.run()
 
         elif args.subcmd == "run_phylip":
             from .run_phylip import run_phylip
