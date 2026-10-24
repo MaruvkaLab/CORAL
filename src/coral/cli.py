@@ -78,6 +78,10 @@ def main():
     multi.add_argument("--max-memory-mb", type=int, default=None,
                        help="Memory budget for the whole run. Caps the worker count of "
                             "each stage.")
+    multi.add_argument("--skip-no-tree", action="store_true",
+                       help="With --newick-tree, skip the PHYLIP search without a starting "
+                            "tree. The spectra use the given tree either way; only the "
+                            "parsimony score comparison is lost.")
 
     # --- split jobs: one HTCondor job per species for the alignment (see split_jobs.py) ---
     split = multi.add_argument_group(
@@ -159,6 +163,8 @@ def main():
             pipeline.run()
 
         elif args.subcmd == "run_multi":
+            if args.skip_no_tree and not args.newick_tree:
+                parser.error("--skip-no-tree needs --newick-tree")
             pipeline = MultiSpeciesMutationPipeline(
                 newick_tree=args.newick_tree,
                 species_list=args.species_list,
@@ -179,6 +185,7 @@ def main():
                 scan_jobs=args.scan_jobs,
                 fitch_jobs=args.fitch_jobs,
                 max_memory_mb=args.max_memory_mb,
+                skip_no_tree=args.skip_no_tree,
             )
             if args.split_jobs or args.split_stage:
                 from .split_jobs import dispatch
