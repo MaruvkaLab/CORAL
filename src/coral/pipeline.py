@@ -516,6 +516,7 @@ class MultiSpeciesMutationPipeline:
         fitch_jobs=None,
         max_memory_mb=None,
         skip_no_tree=False,
+        node_sequences=True,
         **kwargs,
     ):
         if newick_tree is None and species_list is None:
@@ -538,6 +539,7 @@ class MultiSpeciesMutationPipeline:
         self.fitch_jobs = fitch_jobs
         self.max_memory_mb = max_memory_mb
         self.skip_no_tree = skip_no_tree
+        self.node_sequences = node_sequences
 
         kwargs["cores"] = self.cores
         self.params = kwargs
@@ -796,6 +798,8 @@ class MultiSpeciesMutationPipeline:
             output_dir=self.output_dir,
             prefix="multi_species_phylip",
             input_string="5\nY\n",
+            # Option 5 only adds the per-node sequence table to the given-tree outfile.
+            with_tree_input_string=None if self.node_sequences else "Y\n",
             mapping=self.terminal_mapping,
             verbose=self.verbose,
             no_cache=self.no_cache,

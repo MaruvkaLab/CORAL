@@ -82,6 +82,11 @@ def main():
                        help="With --newick-tree, skip the PHYLIP search without a starting "
                             "tree. The spectra use the given tree either way; only the "
                             "parsimony score comparison is lost.")
+    multi.add_argument("--no-node-sequences", action="store_true",
+                       help="With --newick-tree, run PHYLIP on the given tree without menu "
+                            "option 5 (print sequences at all nodes). CORAL never reads that "
+                            "table, and on large runs it is what runs out of memory; the tree, "
+                            "the edge table and the score are unchanged.")
 
     # --- split jobs: one HTCondor job per species for the alignment (see split_jobs.py) ---
     split = multi.add_argument_group(
@@ -165,6 +170,8 @@ def main():
         elif args.subcmd == "run_multi":
             if args.skip_no_tree and not args.newick_tree:
                 parser.error("--skip-no-tree needs --newick-tree")
+            if args.no_node_sequences and not args.newick_tree:
+                parser.error("--no-node-sequences needs --newick-tree")
             pipeline = MultiSpeciesMutationPipeline(
                 newick_tree=args.newick_tree,
                 species_list=args.species_list,
@@ -186,6 +193,7 @@ def main():
                 fitch_jobs=args.fitch_jobs,
                 max_memory_mb=args.max_memory_mb,
                 skip_no_tree=args.skip_no_tree,
+                node_sequences=not args.no_node_sequences,
             )
             if args.split_jobs or args.split_stage:
                 from .split_jobs import dispatch

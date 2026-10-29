@@ -137,7 +137,8 @@ def run_phylip_command(df, output_dir, exe_path, tree=None, prefix="run1", phyli
 
 
 
-def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, mapping, verbose=True, no_cache=False, skip_no_tree=False):
+def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, mapping, verbose=True, no_cache=False, skip_no_tree=False,
+                with_tree_input_string=None):
     from ete3 import Tree
     df = load_random_rows(df_path, verbose=verbose).astype(str)
     # df = pd.read_csv(df_path, index_col=0).astype(str)
@@ -189,7 +190,7 @@ def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, ma
             exe_path=exe_path,
             tree=tree,
             prefix="given_tree_run",
-            phylip_input_args='U\n' + input_string,
+            phylip_input_args='U\n' + (with_tree_input_string or input_string),
             verbose=verbose
         )
         log(f"PHYLIP outputs (with tree): {tree_output}", verbose)
