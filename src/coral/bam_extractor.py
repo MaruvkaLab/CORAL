@@ -260,10 +260,11 @@ def _scan_pair_tile(task):
     def code3(codes, pos):
         return (codes[pos - 1].astype(np.int64) << 4) | (codes[pos].astype(np.int64) << 2) | codes[pos + 1]
 
+    # Each kept window counts once, half to the reference 3-mer and half to the target 3-mer.
     trips = {}
     if kept.any():
-        ref_codes = code3(rc, mid[kept])
-        for code, count in enumerate(np.bincount(ref_codes, minlength=64).tolist()):
+        both = np.bincount(code3(rc, mid[kept]), minlength=64) + np.bincount(code3(tc, mid[kept]), minlength=64)
+        for code, count in enumerate((both / 2).tolist()):
             if count:
                 trips[_TRIPLET[code]] = count
 
@@ -425,7 +426,8 @@ def _pair_near_counts(ref, base, mid):
     rc, tc = _CODE[ref], _CODE[base]
     kept = mid[(rc[mid - 1] == tc[mid - 1]) & (rc[mid + 1] == tc[mid + 1])]
     code3 = lambda c, p: (c[p - 1].astype(np.int64) << 4) | (c[p].astype(np.int64) << 2) | c[p + 1]
-    trips = {_TRIPLET[k]: v for k, v in enumerate(np.bincount(code3(rc, kept), minlength=64).tolist()) if v}
+    both = np.bincount(code3(rc, kept), minlength=64) + np.bincount(code3(tc, kept), minlength=64)
+    trips = {_TRIPLET[k]: v for k, v in enumerate((both / 2).tolist()) if v}
     d = kept[rc[kept] != tc[kept]]
     muts = {}
     for idx, v in enumerate(np.bincount(_PAIR_IDX[code3(rc, d) * 64 + code3(tc, d)], minlength=len(_CHANGE)).tolist()):

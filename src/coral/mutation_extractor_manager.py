@@ -348,8 +348,8 @@ def scan_pair(line_iter, on_mut=None, ref_mask=None, indel_window=1):
     """scan_pileup for one target against the reference. A window is called if its three bases are clean in the
     target and ACGT in both, the flanks are the same and the middle differs; the call is folded to one of 52
     undirected classes. on_mut(chrom, pos, change, mutation) gets the change as seen from the reference, e.g. A[C>T]G,
-    and its class. Returns (mutations, triplets, summary); triplets counts the reference 3-mer of every called or
-    identical window."""
+    and its class. Returns (mutations, triplets, summary); triplets counts every called or identical window once,
+    half to the reference 3-mer and half to the target 3-mer, so it does not depend on which genome is the reference."""
     muts = defaultdict(int)
     trips = defaultdict(int)
     classes = defaultdict(int)
@@ -376,7 +376,8 @@ def scan_pair(line_iter, on_mut=None, ref_mask=None, indel_window=1):
             site_class = 'differs'
         classes[site_class] += 1
         if site_class in ('identical', 'differs'):
-            trips[ref] += 1
+            trips[ref] += 0.5
+            trips[target] += 0.5
         if site_class == 'differs':
             mutation = fold(ref, target)
             muts[mutation] += 1
@@ -867,8 +868,8 @@ class TripletExtractor:
 
 class PairNormalizer:
     """Pair mode: a difference has no known ancestral base, so a class L[a-b]R is normalized by the
-    callable windows holding either allele, LaR or LbR, on either strand. The result therefore does
-    not depend on which genome is the reference."""
+    callable windows holding either allele, LaR or LbR, on either strand. The scan counts each window
+    half to each genome's 3-mer, so the result does not depend on which genome is the reference."""
 
     def __init__(self, input_dir, verbose=True):
         self.input_dir = input_dir

@@ -129,8 +129,9 @@ column says which lineage changed.
 **Location:**
 `<run_id>/Triplets/`
 
-Pair mode writes `<target>__<reference>__triplets.json`: the reference 3-mer of every window
-that was called or identical, i.e. the windows a call could have been made in.
+Pair mode writes `<target>__<reference>__triplets.json`: every window that was called or
+identical, i.e. the windows a call could have been made in, counted half to the reference 3-mer
+and half to the target 3-mer (identical windows count 1, a called window 0.5 to each allele).
 
 ### Normalized Spectra Tables
 

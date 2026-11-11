@@ -312,7 +312,8 @@ def derive_pair_counts(counts, mapq, continuity, indel=False):
             out["trip"][label] += n
         elif site_class == "differs":
             ref3, target3 = _change_triplets(label)
-            out["trip"][ref3] += n
+            out["trip"][ref3] += n / 2
+            out["trip"][target3] += n / 2
             out["mut"][fold(ref3, target3)] += n
     return {name: dict(d) for name, d in out.items()}
 
