@@ -42,14 +42,14 @@ pip install -e .
 ```bash
 coral --help
 samtools --version
-bwa-mem2 version
+bwa 2>&1 | grep Version
 datasets --version
 ```
 
 The provided `environment.yml` installs all required dependencies, including:
 
 * Python 3.10
-* BWA-MEM2 (default aligner; `--aligner-name bwa` still works if classic BWA is installed)
+* BWA (default aligner, BWA-MEM; `--aligner-name bwa-mem2` works if BWA-MEM2 is installed)
 * SAMtools
 * NCBI Datasets CLI
 * unzip
@@ -169,6 +169,10 @@ fine; calling it from `python -c` or from stdin is not.
 The continuity filter treats consecutive records as neighbouring fragments of the source genome, so an aligner that reorders its output silently breaks the filter.
 BWA, BWA-MEM2 and minimap2 preserve input order by default.
 BBMap does not, so its command must include `ordered=t`.
+
+**MAPQ scale.** The default `--mapq 60` follows the BWA MAPQ scale. Other aligners may use different scales (e.g., BBMap never reports 60), so adjust `--mapq` and `--low-mapq` accordingly.
+
+**Reruns.** Finished stages are reused if their output files exist, whatever the options. When changing options, use a new output directory or `--no-cache`.
 
 ### Step 3: Mutation detection
 

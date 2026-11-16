@@ -382,8 +382,8 @@ class Aligner:
         elif aligner_name:
             self.aligner_cmd_template = self.get_aligner_cmd_from_name(aligner_name)
         else:
-            log("No aligner specified. Defaulting to 'bwa-mem2'", self.verbose)
-            self.aligner_cmd_template = self.get_aligner_cmd_from_name("bwa-mem2")
+            log("No aligner specified. Defaulting to 'bwa'", self.verbose)
+            self.aligner_cmd_template = self.get_aligner_cmd_from_name("bwa")
 
         self.validate_aligner_cmd()
 
@@ -427,7 +427,7 @@ class Aligner:
         sort_proc = subprocess.Popen(sort_cmd, stdin=subprocess.PIPE)
         assert align_proc.stdout and sort_proc.stdin
 
-        with TextIOWrapper(align_proc.stdout) as reader, TextIOWrapper(sort_proc.stdin, write_through=True, buffering=1) as writer:
+        with TextIOWrapper(align_proc.stdout) as reader, TextIOWrapper(sort_proc.stdin, write_through=True) as writer:
             if self.annotate:
                 self.filter_stats = annotate_sam(
                     input_stream=reader,
@@ -459,7 +459,8 @@ class Aligner:
                     log_path=self.log_path
                 )
         sort_proc.stdin.close()
-        sort_proc.wait()
+        if align_proc.wait() != 0 or sort_proc.wait() != 0:
+            raise RuntimeError(f"Streamed alignment failed (aligner {align_proc.returncode}, samtools sort {sort_proc.returncode})")
         run_cmd(["samtools", "index", '-c', self.final_bam])
         log(f"Finished (streamed): {self.final_bam}", self.verbose)
         return self.final_bam
@@ -475,7 +476,8 @@ class Aligner:
             log("Running alignment to raw BAM...", self.verbose)
 
             tmp_raw_bam = self.raw_bam + ".tmp"
-            run_cmd(f"{cmd} | samtools view -bS - > {tmp_raw_bam}", shell=True)
+            # pipefail: an aligner that dies after writing the header must fail the run, not leave a truncated BAM
+            run_cmd(["bash", "-o", "pipefail", "-c", f"{cmd} | samtools view -bS - > {tmp_raw_bam}"])
             os.rename(tmp_raw_bam, self.raw_bam) 
 
         else:
@@ -522,7 +524,8 @@ class Aligner:
                 )
             
             sort_proc.stdin.close()
-            sort_proc.wait()
+            if view_proc.wait() != 0 or sort_proc.wait() != 0:
+                raise RuntimeError(f"Filtering {self.raw_bam} failed (samtools view {view_proc.returncode}, samtools sort {sort_proc.returncode})")
             os.rename(tmp_final_bam, self.final_bam) 
 
         # Step 3: Index final.bam

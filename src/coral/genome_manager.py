@@ -149,7 +149,7 @@ class Genome:
 
                 last_start = len(sequence) - length
                 starts = range(0, last_start, offset)
-                if last_start > 0:
+                if last_start >= 0:   # also the single fragment of a contig exactly one fragment long
                     starts = chain(starts, (last_start,))
 
                 for start in starts:
