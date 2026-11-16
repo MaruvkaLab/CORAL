@@ -1,11 +1,7 @@
-"""Parallel execution utilities for the multi-species pipeline.
+"""Parallel alignment, pileup scan and Fitch reconstruction for the multi-species pipeline.
 
-CPU budgets respect the process affinity mask when available, so parallelism
-matches the resources granted by the host or scheduler.
-
-All pools use the `spawn` start method for consistent behaviour across
-platforms. Worker functions must therefore be module-level and use picklable
-arguments, and any state needed by the parent must be returned explicitly.
+All pools use the `spawn` start method, so workers are module-level, take picklable
+arguments and return any state the parent needs.
 """
 
 from __future__ import annotations
@@ -97,7 +93,7 @@ def _init_align_worker():
 
 
 def _align_one(aligner, streamed, kwargs):
-    """Worker: run one species' alignment, return its BAM path and filter stats. """
+    """Worker: run one species' alignment, return its BAM path and filter stats."""
     if streamed:
         aligner.align_streamed(**kwargs)
     else:
@@ -111,7 +107,7 @@ def threads_per_job(cores, n_jobs):
 
 
 def split_threads(cores, n_workers, n_tasks):
-    """Per-task thread counts, with the division remainder handed to the first few tasks. """
+    """Per-task thread counts, with the division remainder given to the first tasks."""
     base = threads_per_job(cores, n_workers)
     if n_workers != n_tasks:
         return [base] * n_tasks
@@ -135,7 +131,7 @@ def plan_align_jobs(n_species, cores, align_jobs=None, max_memory_mb=None):
 
 
 def run_alignments(aligners, streamed, align_kwargs, n_workers, verbose=True):
-    """Align every species in a pool and return the aligners in *input* order. """
+    """Align every species in a pool and return the aligners in input order."""
     if not aligners:
         return []
 
@@ -171,9 +167,8 @@ def run_alignments(aligners, streamed, align_kwargs, n_workers, verbose=True):
 # --------------------------------------------------------------------------
 # Scan: one worker per chromosome
 # --------------------------------------------------------------------------
-# The serial scan reads a whole-genome pileup with a 3-line sliding window. Each
-# worker here pileups one chromosome straight from the indexed BAMs and runs the
-# same window over it, using the same mpileup options (see `mpileup_cmd`).
+# Each worker piles up one chromosome from the indexed BAMs, with the same mpileup
+# options as the whole-genome pileup (see `mpileup_cmd`), and runs the same 3-line window.
 
 
 #: Rough resident memory per scan worker (mpileup child + the Python buffer).
@@ -182,12 +177,8 @@ SCAN_MB_PER_JOB = 1500
 
 
 def scan_stream(extractor, stream, write_row):
-    """Run the 3-line sliding window over one pileup text stream.
-
-    The same windows as ``MultipleSpeciesMutationExtractor._scan_pileup_serial``
-    (the extractor's own ``_windows``), and every decision is delegated to that
-    extractor's own methods. Returns this stream's triplet context counts.
-    """
+    """Run the extractor's 3-line windows and site detection over one pileup stream.
+    Returns the stream's triplet context counts."""
     triplet_counts = defaultdict(int)
 
     for buffer in extractor._windows(stream):
@@ -203,10 +194,8 @@ def scan_stream(extractor, stream, write_row):
 def _scan_region(chrom, ref_fasta, bams, n_species, species_list, mapping, rows_path, indel_window=1):
     """Worker: pileup one chromosome and scan it.
 
-    Returns ``(chrom, triplet_counts, rows_path or None)``. Detected rows go to
-    ``rows_path`` rather than into the return value, so a worker's memory stays
-    bounded however many sites a chromosome carries; the parent concatenates
-    those files into the single gzip stream.
+    Returns (chrom, triplet_counts, rows_path or None). Rows are written to rows_path,
+    not returned, so worker memory stays bounded; the parent concatenates the files.
     """
 
     from .multiple_species_mutation_extractor_manager import (
@@ -226,7 +215,7 @@ def _scan_region(chrom, ref_fasta, bams, n_species, species_list, mapping, rows_
     )
 
     cmd = mpileup_cmd(ref_fasta, bams, region=chrom)
-    # stderr to a file to say tracing the reason and chromosome failure.
+    # stderr goes to a file, so a failure can report its chromosome and reason.
     stderr_path = rows_path + ".stderr"
     with open(stderr_path, "w+") as stderr_file:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr_file)
@@ -266,21 +255,15 @@ def _scan_region(chrom, ref_fasta, bams, n_species, species_list, mapping, rows_
 
 
 def scan_pileup_parallel(extractor, csv_path, triplets_path, header):
-    """Scan the pileup one chromosome at a time and write both output files.
-
-    ``extractor`` drives the run: its ``ref_fasta`` / ``bams`` / ``fai_path`` /
-    ``cores`` / ``scan_jobs`` / ``max_memory_mb`` configure the split, and its
-    detection methods do the work inside each worker. Returns the merged triplet
-    counts, having written ``csv_path`` and ``triplets_path``.
-    """
+    """Scan the pileup one chromosome at a time, write csv_path and triplets_path, and
+    return the merged triplet counts. The extractor supplies the inputs and settings."""
     # Imported here to keep this module light for the workers that don't need it.
     from .mutation_extractor_manager import _chroms_with_reads, _read_fai_chroms
 
     chrom_lengths = _read_fai_chroms(extractor.fai_path)
     chrom_order = [c for c, _ in chrom_lengths]
     with_reads = _chroms_with_reads(extractor.bams)
-    # Longest first so the big ones start early and dominate the makespan;
-    # chromosomes without reads emit nothing and are skipped.
+    # Longest first; chromosomes without reads are skipped.
     tasks = [c for c, _ in sorted(chrom_lengths, key=lambda cl: cl[1], reverse=True)
              if c in with_reads]
 
@@ -296,8 +279,8 @@ def scan_pileup_parallel(extractor, csv_path, triplets_path, header):
     log(f"Scanning pileup in parallel: {len(tasks)} chromosomes with reads "
         f"over {n_workers} workers...", extractor.verbose)
 
-    # One generation with the CSV: clear stale counts so a crash between the two
-    # writes can't pair a fresh CSV with old triplets.
+    # Remove old triplet counts, so a crash between the two writes cannot pair a
+    # new CSV with old triplets.
     if os.path.exists(triplets_path):
         os.remove(triplets_path)
 
@@ -321,15 +304,14 @@ def scan_pileup_parallel(extractor, csv_path, triplets_path, header):
             if rows_path is not None:
                 rows_by_chrom[chrom] = rows_path
 
-        # Accumulate in .fai order, NOT in the order the pool returned results
-        # (longest-chromosome-first).
+        # Accumulate in .fai order, not in the order the pool returned results.
         triplet_counts = defaultdict(int)
         for chrom in chrom_order:
             for context, count in triplets_by_chrom.get(chrom, {}).items():
                 triplet_counts[context] += count
 
-        # A single writer emitting .fai order reproduces the serial scan's
-        # content exactly. Written to a temporary name and renamed to avoid trucation.
+        # Rows in .fai order, as the serial scan writes them, to a temporary name
+        # that is then renamed, so a failed job leaves no truncated file.
         tmp_csv = csv_path + ".tmp"
         with gzip.open(tmp_csv, "wt", newline="") as outfile:
             csv.writer(outfile).writerow(header)
@@ -344,8 +326,7 @@ def scan_pileup_parallel(extractor, csv_path, triplets_path, header):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
     triplet_counts = dict(triplet_counts)
-    # Renamed like the CSV, so a kill mid-write can't leave truncated JSON that
-    # the cache check would then accept.
+    # Renamed like the CSV, so the cache check never accepts a truncated JSON.
     tmp_triplets = triplets_path + ".tmp"
     with open(tmp_triplets, "w") as tf:
         json.dump(triplet_counts, tf, indent=2)
@@ -358,15 +339,10 @@ def scan_pileup_parallel(extractor, csv_path, triplets_path, header):
 # --------------------------------------------------------------------------
 # Fitch: flattened tree, optionally over row blocks
 # --------------------------------------------------------------------------
-# The serial path pays an ete3 deep copy of the tree *per site*, only because
-# `_recursive_state_check` mutates the tree by attaching a `state` feature. Two
-# output-preserving changes are made here:
-#
-# (a) Flatten the tree once into plain arrays. Fitch then writes states into a
-#     per-row scratch list, so nothing is mutated and no copy is needed.
-# (b) Parallelise over row blocks. 
+# The tree is flattened once into plain arrays and each site's states are kept
+# in a list, so the tree is never modified or copied. Row blocks can run in a pool.
 
-#: Rows per block handed to a worker. 
+#: Rows per block handed to a worker.
 FITCH_CHUNK_SIZE = 20_000
 
 #: Rough resident memory per Fitch worker (one DataFrame block + its results).
@@ -374,10 +350,7 @@ FITCH_MB_PER_JOB = 800
 
 
 class FlatTree:
-    """A Fitch-ready, picklable, immutable view of an annotated CORAL tree.
-
-    Node ids follow the same pre-order the original recursion visits.
-    """
+    """A picklable, read-only view of an annotated CORAL tree for Fitch. Node ids are in pre-order."""
 
     __slots__ = ("children", "custom_name", "parent_name", "leaf_col", "root", "taxa_columns")
 
@@ -427,12 +400,9 @@ def _rebuild_flat_tree(children, custom_name, parent_name, leaf_col, root, taxa_
 
 
 def _states(flat, taxa_values):
-    """Fitch downward pass: the state set of every node for one site.
-
-    Sets are never mutated in place, so a single-child node legitimately shares
-    its child's set object, as the original does when it assigns
-    ``node_state = child_states[0]``.
-    """
+    """Fitch state sets of every node for one site, from the leaves up: the intersection of
+    the children's sets if not empty, otherwise their union. Sets are never changed in place,
+    so a node may share its child's set."""
     states = [None] * len(flat.children)
 
     def visit(i):
@@ -457,7 +427,7 @@ def _descend(flat, states, i, parent_state, chrom, pos, left, right, out):
     next_state = parent_state
     if parent_state not in states[i]:
         if len(states[i]) > 1:
-            # Ambiguous: the original returns here, so the subtree is not walked.
+            # Ambiguous state: counted, and its subtree is not walked.
             return 1
         next_state = next(iter(states[i]))
         branch_key = f"{flat.parent_name[i]}→{flat.custom_name[i]}"
@@ -501,13 +471,8 @@ def _fitch_block_worker(block):
 
 def run_fitch(csv_path, tree, mapping, cores=1, fitch_jobs=None, max_memory_mb=None,
               chunk_size=FITCH_CHUNK_SIZE, log_fn=None):
-    """Flattened Fitch over ``matching_bases.csv.gz``, in one process or a pool.
-
-    Returns ``(mutation_dict, ambiguous_count)`` ready for ``_save_results``.
-    With ``fitch_jobs=1`` this is the flattened single-process implementation,
-    still much faster than the per-row ``tree.copy()``; the untouched original
-    recursion stays available through the extractor's serial path.
-    """
+    """Fitch over matching_bases.csv.gz in row blocks, in one process or a pool.
+    Returns (mutation_dict, ambiguous_count) for _save_results."""
     # Imported here so alignment and scan workers don't pay for pandas.
     import pandas as pd
 
@@ -528,8 +493,7 @@ def run_fitch(csv_path, tree, mapping, cores=1, fitch_jobs=None, max_memory_mb=N
         out, ambiguous = result
         ambiguous_total += ambiguous
         for branch_key, records in out.items():
-            # imap preserves input order and blocks are contiguous, so appending
-            # here reproduces the serial per-branch record order.
+            # imap keeps block order, so each branch's records stay in file order.
             mutation_dict.setdefault(branch_key, []).extend(records)
 
     if n_workers <= 1:

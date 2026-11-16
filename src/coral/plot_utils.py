@@ -1,4 +1,4 @@
-# plot_utils.py
+# Diagnostic plots: spectra, read coverage and mutation density along chromosomes
 
 import os
 import pandas as pd
@@ -92,14 +92,7 @@ class MutationSpectraPlotter:
         plt.close()
     
     def plot(self, tables_dir, output_dir=None, verbose=True):
-        """
-        Generate all plots (raw, normalized, triplets, overlay) using MutationPlotter.
-
-        Args:
-            input_dir (str): Path to directory with summary TSVs.
-            output_dir (str or None): Where to save plots. Defaults to sibling 'Plots/' folder.
-            verbose (bool): Whether to print progress updates.
-        """
+        """Plot raw, normalized, triplet and overlay spectra from the TSVs in tables_dir (default output: sibling Plots/)."""
         input_dir = tables_dir
         if output_dir is None:
             output_dir = os.path.join(os.path.dirname(input_dir), "Plots")
@@ -109,14 +102,12 @@ class MutationSpectraPlotter:
             if verbose:
                 print(f"[plot_runner] {msg}")
 
-        # Load required TSVs
         log("Loading mutation summary tables...")
         norm = pd.read_csv(os.path.join(input_dir, "normalized_scaled.tsv"), sep='\t', index_col=0)
         raw = pd.read_csv(os.path.join(input_dir, "collapsed_mutations.tsv"), sep='\t', index_col=0)
         scaled = pd.read_csv(os.path.join(input_dir, "scaled_raw.tsv"), sep='\t', index_col=0)
         trip = pd.read_csv(os.path.join(input_dir, "triplets.tsv"), sep='\t', index_col=0)
 
-        # Plot per-column mutation and triplet spectra
         for col in norm.columns:
             log(f"Plotting normalized mutations for {col}")
             self.plot_mutations(
@@ -138,7 +129,6 @@ class MutationSpectraPlotter:
                 f"Triplet Spectrum: {col}"
             )
 
-        # Overlay plots if exactly 2 species
         if len(norm.columns) == 2:
             species1, species2 = norm.columns
             log(f"Plotting overlay for normalized spectra: {species1} vs {species2}")
@@ -171,9 +161,7 @@ class CoveragePlotter:
         return chrom_lengths
 
     def compute_binned_coverage(self, interval_file, chrom, bin_size=1000, slide=1000):
-        """
-        Used for plotting: returns midpoints and coverage values.
-        """
+        """Return bin midpoints and mean depth per bin (summed interval overlap / bin_size)."""
         chrom_length = self.chrom_lengths.get(chrom)
         if chrom_length is None:
             raise ValueError(f"Chromosome {chrom} not found in .fai index.")
@@ -211,9 +199,7 @@ class CoveragePlotter:
         return midpoints, coverage
 
     def compute_coverage_for_normalization(self, interval_file, chrom, bin_size=1000, slide=1000):
-        """
-        Used for normalizing mutation counts: returns only coverage values.
-        """
+        """Return only the per-bin depths, for normalizing mutation counts."""
         _, coverage = self.compute_binned_coverage(interval_file, chrom, bin_size, slide)
         return coverage
 

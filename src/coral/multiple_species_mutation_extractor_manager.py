@@ -11,11 +11,7 @@ from .utils import log
 
 class ParsedLine(list):
     """Parsed pileup row: [chrom, pos, ref, (depth, bases), ...].
-
-    Subclasses list to preserve native list-indexing performance.
-    clean_sample(i) caches cleaned bases per sample, avoiding repeated
-    clean_bases() calls when a row is reused across sliding windows.
-    """
+    clean_sample(i) caches each sample's cleaned bases, as a row is reused by three windows."""
     __slots__ = ('_clean',)
 
     def __init__(self, chrom, pos, ref_base, samples):
@@ -45,7 +41,7 @@ class MultipleSpeciesMutationExtractor:
         self.no_cache = no_cache
         self.verbose = verbose
 
-        # Optional; omitting these reproduces the serial behaviour exactly.
+        # Optional: the indexed BAMs and reference enable the per-chromosome scan.
         self.ref_fasta = ref_fasta
         self.bams = list(bams) if bams else None
         self.fai_path = fai_path
@@ -80,12 +76,11 @@ class MultipleSpeciesMutationExtractor:
                    for i, (depth, bases) in enumerate(fields[3:]))
 
     def _detect_site(self, buffer):
-        """One look at the 3-line window -> (mutation_row, triplet_context).
+        """3-line window -> (mutation_row, triplet_context).
 
-        Flanks must match their own ref base. The centre is then one of:
-        ingroup varies -> row + counted context; all at ref -> counted context
-        only; no sample at ref -> neither, as a single outgroup cannot polarise
-        it (same exclusion as the two-taxa detect_mutation_triplet).
+        All samples must match the reference at both flanks. At the centre: samples differ ->
+        row and context; all at the reference base -> context only; no sample at the reference
+        base -> neither, as the outgroup cannot polarize it (as in detect_mutation_triplet).
         """
         def normalize(fields, ref_base):
             rb = ref_base.upper()
@@ -125,8 +120,7 @@ class MultipleSpeciesMutationExtractor:
 
     @property
     def parallel_scan(self):
-        """True when the scan can run per chromosome: it needs the indexed BAMs
-        and the reference, which the serial path does not."""
+        """True when the scan can run per chromosome (the indexed BAMs and reference are given)."""
         return bool(self.ref_fasta and self.bams and self.fai_path)
 
 
@@ -134,9 +128,8 @@ class MultipleSpeciesMutationExtractor:
         if node.is_leaf():
             node.add_feature("state", {row[f"taxa{self.mapping[node.name]}"]})
             return node.state
-        # Handle nodes with any number of children (supporting multifurcating trees)
         child_states = [self._recursive_state_check(child, row) for child in node.children]
-        # Intersect all child states if any intersection exists, otherwise union
+        # Fitch: intersect the child states if not empty, otherwise take their union
         node_state = child_states[0]
         for child_state in child_states[1:]:
             intersect = node_state & child_state
@@ -146,7 +139,6 @@ class MultipleSpeciesMutationExtractor:
 
     def _recursive_fitch(self, node, parent_state, row, mutation_dict, ambiguous_count):
         next_state = parent_state
-        # Ensure node.state exists (should be set by _recursive_state_check, but add safety check)
         if not hasattr(node, 'state'):
             raise RuntimeError(f"Node {node.name} missing state attribute. Tree may not have been properly initialized.")
         if parent_state not in node.state:
@@ -215,16 +207,12 @@ class MultipleSpeciesMutationExtractor:
             log(f"Total ambiguous mutations: {ambiguous_counter}", self.verbose)
 
     def _scan_pileup_serial(self, csv_path, triplets_path, header):
-        """Scan the whole-genome pileup with a 3-line sliding window.
-
-        Writes both scan outputs and returns the triplet counts, matching
-        parallel.scan_pileup_parallel. Written to a temporary name and renamed
-        so failed jobs don't leave truncated files.
-        """
+        """Scan the whole-genome pileup with a 3-line sliding window, write both outputs
+        (to temporary names, then renamed) and return the triplet counts."""
         triplet_counts = defaultdict(int)
         tmp_path = csv_path + ".tmp"
-        # One generation with the CSV: clear stale counts so a crash between the
-        # two writes can't pair a fresh CSV with old triplets.
+        # Remove old triplet counts, so a crash between the two writes cannot pair a
+        # new CSV with old triplets.
         if os.path.exists(triplets_path):
             os.remove(triplets_path)
         try:
@@ -255,7 +243,7 @@ class MultipleSpeciesMutationExtractor:
         return triplet_counts
 
     def _fitch_serial(self, csv_path):
-        """Fitch reconstruction, one row at a time over the scanned CSV."""
+        """Fitch reconstruction, one row at a time on a copy of the tree."""
         mutation_dict = defaultdict(list)
         ambiguous_counter = 0
 
@@ -270,12 +258,11 @@ class MultipleSpeciesMutationExtractor:
         spectra_plotter = MutationSpectraPlotter()
         os.makedirs(self.plots_dir, exist_ok=True)
         os.makedirs(self.csv_dir, exist_ok=True)
-        # run_trio's normaliser, so both pipelines fold and scale identically.
-        # It owns Tables/ and creates it.
+        # The trio normalizer, so both pipelines collapse and scale the same way.
         normalizer = MutationNormalizer(self.output_dir, verbose=self.verbose)
         tables_dir = normalizer.output_dir
 
-        # One shared, branch-agnostic denominator for every branch.
+        # One 3-mer denominator shared by all branches.
         collapsed_triplets = normalizer.collapse_triplets(
             normalizer.filter_triplets_dict(self.triplet_counts or {}))
 
@@ -302,6 +289,6 @@ class MultipleSpeciesMutationExtractor:
         spectra_df.to_csv(os.path.join(tables_dir, "collapsed_mutations.tsv"), sep="\t")
         pd.DataFrame(normalized_scaled).to_csv(os.path.join(tables_dir, "normalized_scaled.tsv"), sep="\t")
         pd.DataFrame(scaled_raw).to_csv(os.path.join(tables_dir, "scaled_raw.tsv"), sep="\t")
-        # The denominator is one shared vector, so a single column, not per-branch.
+        # One shared denominator, so a single column.
         pd.Series(collapsed_triplets, name="triplets").to_frame().to_csv(
             os.path.join(tables_dir, "triplets.tsv"), sep="\t")

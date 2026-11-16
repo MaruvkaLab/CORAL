@@ -37,7 +37,7 @@ class Genome:
             "datasets", "download", "genome", "accession", self.accession,
             "--filename", zip_path
         ]
-        # Removes the progress bar if stderr is not a TTY (e.g., when running in a non-interactive environment)
+        # No progress bar when stderr is not a TTY (e.g., cluster jobs)
         if not sys.stderr.isatty():
             download_cmd.append("--no-progressbar")
         # Raises NCBI's per-IP rate limit (3 -> 10 req/s) when a key is available
@@ -62,10 +62,8 @@ class Genome:
             shutil.rmtree(temp_dir)
             raise FileNotFoundError("Missing FASTA")
 
-        # Move the FASTA file to final location (efficient alternative to copy)
         shutil.move(fna_source, self.fasta_path)
 
-        # Strip header and clean up
         log("Stripping FASTA headers (keeping only the first word)...", self.verbose)
         subprocess.run(["sed", "-i", "s/ .*$//", self.fasta_path], check=True)
 
@@ -78,10 +76,9 @@ class Genome:
 
         aligner = (aligner or "").lower()
 
-        # We only explicitly index for the BWA family.
-        # minimap2 and bbmap build indices implicitly or in-memory.
+        # Only the BWA family needs an explicit index; minimap2 and bbmap index in memory.
         if aligner not in {"bwa", "bwa-mem2"}:
-            # Still ensure FASTA index exists (used by samtools / pileup)
+            # samtools still needs the FASTA index
             fai = f"{self.fasta_path}.fai"
             if not os.path.exists(fai) or self.no_cache:
                 if os.path.exists(fai):
@@ -89,8 +86,6 @@ class Genome:
                 run_cmd(["samtools", "faidx", self.fasta_path], verbose=self.verbose)
             log(f"No explicit index required for aligner '{aligner}'.", self.verbose)
             return
-
-        # ---- BWA family explicit indexing ----
 
         if aligner == "bwa-mem2":
             # bwa-mem2 writes no .sa; requiring one would re-index on every run
@@ -110,16 +105,14 @@ class Genome:
             log(f"Index files already exist for {self.name}. Skipping indexing.", self.verbose)
             return
 
-        # Remove existing index files (safe for re-index)
+        # Remove stale index files before re-indexing
         for ext in required_exts + ["fai"]:
             path = f"{self.fasta_path}.{ext}"
             if os.path.exists(path):
                 os.remove(path)
 
-        # Build aligner index
         run_cmd(index_cmd, verbose=self.verbose)
 
-        # Always build samtools FASTA index
         run_cmd(["samtools", "faidx", self.fasta_path], verbose=self.verbose)
 
         log(f"Indexing complete for {self.name}", self.verbose)
@@ -127,6 +120,7 @@ class Genome:
 
     def generate_fragment_fastq(self, length=150, output_fastq = None, offset=75, force=False,
                                 repeat_mask=None, mask_frac=0.5):
+        """Fragment the genome into pseudo-reads (150 bp at a 75 bp step by default) and write a FASTQ."""
         output_fastq = output_fastq if output_fastq else os.path.join(self.output_dir, f"{self.name}.fastq")
 
         if os.path.exists(output_fastq) and not force:
@@ -135,9 +129,8 @@ class Genome:
             return output_fastq
 
 
-        # If a repeat mask is given, don't emit a fragment that is >= mask_frac
-        # repeat: those reads carry no clean orthologous signal and mostly seed
-        # paralog/repeat mis-mappings. Fragment span is 1-based inclusive.
+        # With a repeat mask, skip fragments that are >= mask_frac masked (they mostly
+        # mis-map to paralogs). Read names carry the 1-based inclusive span.
         self.n_contigs = self.total_bp = 0
         written = skipped = 0
         with open(output_fastq, 'w') as out:
@@ -149,7 +142,7 @@ class Genome:
 
                 last_start = len(sequence) - length
                 starts = range(0, last_start, offset)
-                if last_start >= 0:   # also the single fragment of a contig exactly one fragment long
+                if last_start >= 0:   # last fragment ends at the contig end; shorter contigs give none
                     starts = chain(starts, (last_start,))
 
                 for start in starts:

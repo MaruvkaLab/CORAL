@@ -3,9 +3,8 @@ import os
 import subprocess
 from .utils import log, run_cmd
 
-#: Options shared by the whole-genome pileup and the per-chromosome scan. That
-#: identity is what makes a chromosome's pileup a slice of the whole-genome one,
-#: so they must be built from here rather than spelled out twice.
+#: Options shared by the whole-genome pileup and the per-chromosome scan, so a
+#: chromosome's pileup is a slice of the whole-genome one.
 MPILEUP_OPTS = ["-B", "-d", "100"]
 ANNOTATE_OPTS = ["-B", "-d", "0", "-s", "--output-extra", "ZN"]   # annotate: all reads, their MAPQ and ZN
 
@@ -30,7 +29,7 @@ class Pileup:
         self.bams = aligners
         self.taxon_names = [aligner.species for aligner in self.bams]
         self.run_id = run_id if run_id else f"{self.reference}__{'__'.join(self.taxon_names)}"
-        # annotate Each BAM with per-read MAPQ (-s) and per-read ZN tag
+        # annotate: keep all reads, with per-read MAPQ (-s) and ZN tag
         self.annotate = annotate
 
         suffix = ".annotated.pileup.gz" if annotate else ".pileup.gz"
@@ -41,11 +40,9 @@ class Pileup:
             raise FileNotFoundError(f"Missing file: {path}")
 
     def generate(self):
-        # Check files
         for path in [self.ref_fasta] + [aligner.final_bam for aligner in self.bams]:
             self._check_file(path)
 
-        # Skip if exists and caching allowed
         if os.path.exists(self.pileup_path) and not self.no_cache:
             log(f"Pileup already exists: {self.pileup_path}", self.verbose)
             return self.pileup_path
@@ -53,7 +50,7 @@ class Pileup:
         log(f"Generating pileup: {self.pileup_path}", self.verbose)
         cmd = mpileup_cmd(self.ref_fasta, [bam.final_bam for bam in self.bams], annotate=self.annotate)
 
-        # Use a temporary file for atomic write
+        # Write to a temporary file, then rename
         tmp_path = self.pileup_path + ".tmp"
 
         try:
@@ -78,10 +75,7 @@ class Pileup:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             raise RuntimeError(f"Failed to generate pileup: {e}")
-        
-        # Save species mapping for reference
-        #with open(os.path.join(self.output_dir, "pileup_species_mapping.json"), 'w') as f:
-        #    json.dump(self.taxon_names, f, indent=2)
+
 
         return self.pileup_path
 

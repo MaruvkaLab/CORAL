@@ -72,7 +72,8 @@ def _tool_versions():
 
 
 class MutationExtractionPipeline:
-    def __init__(self, 
+    """Pair or trio run: fragment the ingroup genomes, align them to the reference (outgroup) and extract calls."""
+    def __init__(self,
                  species_list,
                  outgroup,
                  aligner_name="bwa", 
@@ -142,7 +143,7 @@ class MutationExtractionPipeline:
             start = time.time()
             cpu_before = _cpu_seconds()
             func()
-            gc.collect()  # Clean up memory after each stage
+            gc.collect()
             end = time.time()
             mem_after = get_memory()
             cpu_after = _cpu_seconds()
@@ -249,7 +250,7 @@ class MutationExtractionPipeline:
         log(f"Run summary saved to: {path}", self.verbose)
 
     def download_genomes(self):
-        """The reference (outgroup) and the ingroup genomes, downloaded first so the download is timed on its own."""
+        """Download the reference (outgroup) and ingroup genomes, as a separate stage so it is timed on its own."""
         self.reference = Genome(name=self.outgroup[0], accession=self.outgroup[1], output_dir=self.output_dir,
                                 no_cache=self.no_cache, verbose=self.verbose)
         self.reference.download()
@@ -384,7 +385,7 @@ class MutationExtractionPipeline:
         PairNormalizer(self.output_dir, verbose=self.verbose).normalize()
 
     def extract_five_mers(self):
-        """Five_mers/: the trio's mutations and opportunity by 5-mer, a second scan of the BAMs with the same filters."""
+        """Count the trio's mutations and opportunities by 5-mer (Five_mers/), in a second BAM scan with the same filters."""
         BamTrioExtractor(
             reference=self.reference.name, taxon1=self.genomes[0].name, taxon2=self.genomes[1].name,
             ref_fasta=self.reference.fasta_path, bams=[aligner.final_bam for aligner in self.alignments],
@@ -394,8 +395,9 @@ class MutationExtractionPipeline:
             ref_mask=self.reference_mask, indel_window=self.params.get("indel_window", 1), five_mer=True).extract()
 
     def _parallel_annotate(self):
-        """Annotate mode scans a chromosome per process when it has more than one core.
-        Asked in two places -- the pileup is only generated when this is False."""
+        """True if annotate mode scans one chromosome per process (more than one core).
+
+        The whole-genome pileup is only generated when this is False."""
         return (self.params.get("cores") or 1) > 1
 
     def extract_annotated(self):
@@ -515,6 +517,7 @@ from .run_phylip import run_phylip, check_phylip_available
 
 
 class MultiSpeciesMutationPipeline:
+    """Multi-species run: align all species to the outgroup, build a PHYLIP dnapars tree and assign changes by Fitch parsimony."""
     def __init__(
         self,
         newick_tree = None,
@@ -597,10 +600,8 @@ class MultiSpeciesMutationPipeline:
         self._extract_mutations()
         self._reconstruct_phylogeny()
 
-        # Fitch runs on PHYLIP's tree so branch labels match its .outfile: the
-        # topology it scored for a given tree (dnapars 'U' mode leaves it
-        # unchanged), or the one it inferred when no tree was given. Without
-        # this the species_list path has no tree at all and writes no spectra.
+        # Fitch runs on PHYLIP's tree so branch labels match its .outfile: the given
+        # topology (dnapars 'U' mode keeps it), or the inferred one when no tree was given.
         if self.newick_tree:
             phylip_outtree = os.path.join(self.output_dir, "multi_species_phylip_with_tree", "given_tree_run.outtree")
         else:

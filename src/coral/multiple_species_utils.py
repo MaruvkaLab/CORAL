@@ -10,6 +10,7 @@ import json
 from .utils import log
 
 def parse_species_accession_from_newick(newick_str):
+    """{species: accession} from 'species|accession' leaf names, and the outgroup (a single-leaf child of the root)."""
     from ete3 import Tree
     tree = Tree(newick_str, format=1)
     species_accession_dict = {}
@@ -37,10 +38,12 @@ def parse_species_accession_from_newick(newick_str):
 
 
 def annotate_tree_with_indices(newick_str, outgroup_name, file_path=None, verbose=True):
+    """Index the leaves (outgroup = 0) and internal nodes (post-order) and name internal nodes Node(i).
+    Returns (tree, mapping index <-> name, leaf names in index order)."""
     from ete3 import Tree
     tree = Tree(newick_str, format=1)
 
-    # Normalize leaf names
+    # Drop the '|accession' part of leaf names
     for leaf in tree.iter_leaves():
         if '|' in leaf.name:
             leaf.name = leaf.name.split('|', 1)[0]
@@ -76,7 +79,7 @@ def annotate_tree_with_indices(newick_str, outgroup_name, file_path=None, verbos
         for node in tree.traverse():
             node.name = original_names[node]
 
-        mapping_path = f"{os.path.splitext(file_path)[0]}_mapping2.json" ### edited
+        mapping_path = f"{os.path.splitext(file_path)[0]}_mapping.json"
         with open(mapping_path, "w") as f:
             json.dump(terminal_mapping, f, indent=2)
 
@@ -100,10 +103,10 @@ def annotate_list_with_indices(species_list, outgroup_name, file_path=None, verb
         terminal_mapping[node] = idx
 
     if file_path is not None:
-        mapping_path = f"{os.path.splitext(file_path)[0]}_mapping2.json" ### edited
+        mapping_path = f"{os.path.splitext(file_path)[0]}_mapping.json"
         with open(mapping_path, "w") as f:
             json.dump(terminal_mapping, f, indent=2)
-        
+
         log(f"Terminal mapping saved to {mapping_path}", verbose)
 
     return sorted_terminals, terminal_mapping
@@ -178,7 +181,7 @@ def phylip_interior_clades(edges, outgroup_label):
 
 
 def read_phylip_outtree_newick(outtree_path, verbose=True):
-    r"""The first newick string in a PHYLIP .outtree. """
+    """The first newick string in a PHYLIP .outtree."""
     text = open(outtree_path).read()
 
     start = text.find("(")
@@ -196,11 +199,8 @@ def read_phylip_outtree_newick(outtree_path, verbose=True):
 
 
 def tree_from_phylip_outtree(outtree_path, terminal_mapping, outgroup_name):
-    """PHYLIP's tree (leaves 'taxa0'..'taxaN', unrooted) annotated for Fitch.
-
-    Indices come from `terminal_mapping`, so leaves stay
-    aligned with the taxaK columns in matching_bases.csv.gz.
-    """
+    """PHYLIP's unrooted tree (leaves 'taxa0'..'taxaN'), rooted on the outgroup and annotated for Fitch.
+    Indices come from `terminal_mapping`, so leaves match the taxaK columns of matching_bases.csv.gz."""
     from ete3 import Tree
 
     newick = read_phylip_outtree_newick(outtree_path)

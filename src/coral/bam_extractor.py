@@ -1,19 +1,7 @@
-"""Pair-mode calls made straight from the final BAM, with no pileup in between.
+"""Pair and trio calls made directly from the final BAMs, one reference tile at a time.
 
-The pileup path spends its time on one text line per covered base; the reads are
-~75x fewer. Here each tile of the reference is walked read by read into a handful
-of per-position arrays, and NumPy finds the clean 3-base windows and the calls.
-Alignment is processed in tiles, so memory stays flat on any genome.
-
-This reproduces `samtools mpileup -B -d 0` piped into `scan_pair`, which stays in
-`mutation_extractor_manager` as the reference implementation:
-
-  * reads with UNMAP / SECONDARY / QCFAIL / DUP are skipped
-  * a deletion flags the deleted positions (mpileup writes `*` there), an
-    insertion flags the base *before* it (`+N`), and `-N` is not an indel event;
-
-`scan_region` and `tile_spans`/`run_tiles` are deliberately mode-independent: the
-CIGAR walk and the tiling are the same job for any number of samples.
+Reads flagged UNMAP, SECONDARY, QCFAIL or DUP are skipped. A deletion flags the deleted positions and
+an insertion flags the base before it; flagged positions are not callable.
 """
 
 import gzip
@@ -28,7 +16,7 @@ import pysam
 from .mutation_extractor_manager import (_chroms_with_reads, _read_fai_chroms, _write_extractor_outputs, fold)
 from .utils import log
 
-# mpileup's default --ff: UNMAP, SECONDARY, QCFAIL, DUP.
+# UNMAP, SECONDARY, QCFAIL, DUP
 SKIP_FLAGS = 0x4 | 0x100 | 0x200 | 0x400
 
 CIGAR_ALIGNED = (0, 7, 8)   # M, =, X
@@ -60,8 +48,7 @@ _OPEN = {}
 
 
 def _opened(kind, path):
-    """Per-process handle cache: a worker scans hundreds of tiles, and reopening
-    the BAM index or the .fai for each one costs more than the scan."""
+    """Per-process cache of open FASTA and BAM handles, so tiles do not reopen them."""
     handle = _OPEN.get((kind, path))
     if handle is None:
         handle = pysam.FastaFile(path) if kind == 'fasta' else pysam.AlignmentFile(path)
@@ -70,14 +57,13 @@ def _opened(kind, path):
 
 
 def scan_region(bam, chrom, lo, hi):
-    """Walk every read overlapping the 0-based half-open span [lo, hi) into five
-    per-position arrays, one slot per reference base:
+    """Walk every read overlapping the 0-based half-open span [lo, hi) into five per-position arrays:
 
-      covered   a read covers this position (mpileup would emit a line: depth >= 1)
+      covered   a read covers this position
       base      the first read base seen here, 0 where none
-      disagree  two reads showed different bases
-      deleted   a read's deletion covers this position -- mpileup's '*'
-      inserted  a read has an insertion right after this position -- mpileup's '+N'
+      disagree  two reads show different bases
+      deleted   a read's deletion covers this position
+      inserted  a read has an insertion right after this position
     """
     n = max(0, hi - lo)
     covered = np.zeros(n, bool)
@@ -128,8 +114,8 @@ def scan_region(bam, chrom, lo, hi):
 
 
 def tile_spans(fai_path, bams, tile_bp):
-    """returns a list of tiles in reference (.fai) order, to be processed in chunks to avoid exploding memory.
-    `bams` is one path or several; a contig is tiled if any of them has reads there."""
+    """(chrom, start, end, length) tiles in .fai order. `bams` is one path or several;
+    a contig is tiled if any of them has reads there."""
     lengths = _read_fai_chroms(fai_path)
     have = _chroms_with_reads([bams] if isinstance(bams, str) else list(bams))
     return [(chrom, start, min(start + tile_bp, length), length)
@@ -138,8 +124,8 @@ def tile_spans(fai_path, bams, tile_bp):
 
 
 def tile_scan_span(lo, hi, length, indel_window, five_mer=False):
-    """Computes the 0-based half-open span a tile must scan: its own [lo, hi) plus enough 
-    padding for every middle base's flanks and indel neighbourhood, clipped to the contig."""
+    """The 0-based half-open span a tile scans: [lo, hi) padded for the flanks and the indel
+    window of every middle base, clipped to the contig."""
     pad = max(2 if five_mer else 1, indel_window)      # 2: a 5-mer's outer bases
     return max(0, lo - pad), min(length, hi + pad)
 
@@ -162,10 +148,9 @@ def run_tiles(tasks, worker, cores, handle):
 class GapCounter:
     """Totals `non_consecutive` over tiles fed in reference order.
 
-    Each tile counts the gap triples that lie wholly inside it and hands over its
-    first and last two lines. A triple straddling a boundary is counted here, once,
-    against the carried tail of the tiles before it -- so tiling cannot change the
-    total, and a tile with no lines at all just passes the carry through.
+    Each tile counts the gap triples wholly inside it and passes its first and last two lines.
+    A triple across a tile boundary is counted here, once, against the carried tail of the
+    tiles before it, so tiling does not change the total. A tile with no lines passes the carry on.
     """
 
     def __init__(self):
@@ -186,9 +171,8 @@ class GapCounter:
 
 
 def _scan_pair_tile(task):
-    """Processes one tile: the calls whose middle base lies in [lo, hi). It spans
-    [lo - pad, hi + pad) so those middles have their flanks, and their indel
-    neighbourhood, inside the tile; every middle belongs to exactly one tile."""
+    """Pair calls whose middle base lies in [lo, hi). The scan is padded so their flanks and
+    indel window are inside it; every middle belongs to exactly one tile."""
     bam_path, fasta_path, chrom, lo, hi, length, ref_mask, indel_window = task
     a, b = tile_scan_span(lo, hi, length, indel_window)
     n = b - a
@@ -196,7 +180,7 @@ def _scan_pair_tile(task):
     ref = np.frombuffer(_opened('fasta', fasta_path).fetch(chrom, a, b).upper().encode(), np.uint8)
     covered, base, disagree, deleted, inserted = scan_region(_opened('bam', bam_path), chrom, a, b)
     masked = ref_mask.mask_array(chrom, a + 1, b) if ref_mask is not None else None
-    # The clean positions are the good positions, that passed QC to use for calling.
+    # Clean: covered, no indel, reads agree and not masked.
     clean = covered & ~deleted & ~inserted & ~disagree
     if masked is not None:
         clean &= ~masked
@@ -210,7 +194,7 @@ def _scan_pair_tile(task):
         usable, lines_masked = cov & ~msk, int((cov & msk).sum())
     lines_after_mask = int(usable.sum())
 
-     # Counts why each unusable line was unusable.
+    # Why each line was dropped: the first of deletion, insertion, reads_disagree.
     dl, ins, dis = deleted[inside], inserted[inside], disagree[inside]
     dropped = {'deletion': int((usable & dl).sum()),
                'insertion': int((usable & ~dl & ins).sum()),
@@ -222,8 +206,8 @@ def _scan_pair_tile(task):
     else:
         mid = np.empty(0, np.int64)
 
-    # scan_windows needs three adjacent *lines* clean, not three bases. A gap is
-    # such a triple whose outer lines are not two apart.
+    # non_consecutive, as scan_windows counts it: three adjacent clean covered positions
+    # whose positions are not consecutive.
     line_idx = np.flatnonzero(usable)
     line_clean = clean[inside][line_idx]
     if line_idx.size >= 3:
@@ -237,7 +221,7 @@ def _scan_pair_tile(task):
     tail = [(int(lo + p), bool(c)) for p, c in
             zip(line_idx[-2:].tolist(), line_clean[-2:].tolist())]
 
-    # Drop calls sitting within 'indel_window' bases of an indel. 
+    # Drop windows whose middle is within indel_window bases of an indel.
     n_near, near_counts = 0, ({}, {})
     if indel_window > 1 and mid.size:
         near = _near_indel(deleted | inserted, mid, indel_window)
@@ -246,7 +230,7 @@ def _scan_pair_tile(task):
         mid = mid[~near]
 
     rc, tc = _CODE[ref], _CODE[base]
-    # Checks all bases are A/C/G/T, the flanks are identical, and whether the middle differs (mutation).
+    # All bases A/C/G/T, identical flanks, and whether the middle differs.
     acgt = _acgt((ref, base), mid, (-1, 0, 1))
     flanks = (rc[mid - 1] == tc[mid - 1]) & (rc[mid + 1] == tc[mid + 1])
     same = rc[mid] == tc[mid]
@@ -284,10 +268,7 @@ def _scan_pair_tile(task):
 
 class BamPairExtractor:
     """Pair mode: one target against the reference, scanned from the BAM.
-
-    Writes exactly the files `PairExtractor` writes -- same names, the same CSV
-    columns, the same mutation and triplet JSON, the same `run_summary.json` sections.
-    """
+    Writes the same files as PairExtractor."""
 
     def __init__(self, reference, target, ref_fasta, bam, mutation_output_dir, triplet_output_dir,
                  cores=None, no_cache=False, verbose=True, ref_mask=None, indel_window=1,
@@ -322,8 +303,7 @@ class BamPairExtractor:
         spans = tile_spans(self.ref_fasta + ".fai", self.bam, self.tile_bp)
 
         def tile_mask(chrom, lo, hi, length):
-            """Just this tile's slice of the mask; None when it holds no repeats,
-            so the worker skips mask_array and the masking entirely."""
+            """This tile's slice of the mask, or None when it holds no repeats."""
             if not self.ref_mask:
                 return None
             a, b = tile_scan_span(lo, hi, length, self.indel_window)
@@ -399,10 +379,8 @@ def _sample_problems(covered, deleted, inserted, disagree):
 
 
 def _keyed(cols, fmt):
-    """(inverse index, names) for parallel uint8 columns: only the distinct byte
-    combinations become strings -- a few dozen, against millions of rows. Unlike
-    pair mode this keeps raw bytes, because the trio scan compares characters and
-    checks for ACGT only through _CODE, before the keys are made."""
+    """(inverse index, names) for parallel uint8 columns of raw bytes. Only the distinct
+    byte combinations are made into strings."""
     key = np.zeros(len(cols[0]), np.int64)
     for col in cols:
         key = (key << 8) | col.astype(np.int64)
@@ -414,14 +392,14 @@ def _keyed(cols, fmt):
 
 
 def _tally(inv, names, into):
+    """Add the count of each name in `inv` to `into`."""
     for i, count in enumerate(np.bincount(inv, minlength=len(names)).tolist()):
         if count:
             into[names[i]] = into.get(names[i], 0) + count
 
 
 def _pair_near_counts(ref, base, mid):
-    """({mutation: n}, {triplet: n}) at windows dropped for a nearby indel, classed as pair mode classes
-    the kept windows, so what the indel window removes can be looked at (the trio has _near_counts)."""
+    """({mutation: n}, {triplet: n}) at windows dropped for a nearby indel, counted as kept windows are."""
     mid = mid[_acgt((ref, base), mid, (-1, 0, 1))]
     rc, tc = _CODE[ref], _CODE[base]
     kept = mid[(rc[mid - 1] == tc[mid - 1]) & (rc[mid + 1] == tc[mid + 1])]
@@ -454,7 +432,7 @@ def _acgt(arrays, mid, offsets):
 
 def _near_counts(ref, base1, base2, mid):
     """({mutation: n} of taxon 1, of taxon 2, {triplet: n}) at windows dropped for a nearby indel,
-    classed as the kept windows are, so what the indel window removes can be looked at."""
+    counted as kept windows are."""
     mut1, mut2, trip = {}, {}, {}
     mid = mid[_acgt((ref, base1, base2), mid, (-1, 0, 1))]
     r_p, r_c, r_n = ref[mid - 1], ref[mid], ref[mid + 1]
@@ -473,9 +451,9 @@ def _near_counts(ref, base1, base2, mid):
 
 
 def _five_counts(ref, base1, base2, clean, mid):
-    """5-mer counterpart of the trio counts: ({mutation: n} of taxon 1, of taxon 2, {5-mer: n} opportunity).
-    mid are the kept windows (the middle three bases clean, A/C/G/T and away from indels); of these, those
-    whose outer two bases are also clean and A/C/G/T, and whose four flanking bases agree in all three."""
+    """Trio 5-mer counts: ({mutation: n} of taxon 1, of taxon 2, {5-mer: n} opportunity).
+    Uses the kept 3-base windows whose outer two bases are also clean and A/C/G/T, and whose
+    four flanking bases are identical in all three genomes."""
     n = len(ref)
     mid = mid[(mid >= 2) & (mid < n - 2)]
     mid = mid[clean[mid - 2] & clean[mid + 2]]
@@ -500,9 +478,8 @@ def _five_counts(ref, base1, base2, clean, mid):
 
 
 def _scan_trio_tile(task):
-    """Processes one tile for two taxa against the reference: the trio counterpart
-    of _scan_pair_tile. mpileup emits a line wherever *either* BAM has reads, so
-    no_depth is a real dropped reason here, unlike in pair mode."""
+    """Trio counterpart of _scan_pair_tile, for two taxa against the reference. A position
+    is covered wherever either BAM has reads, so no_depth is a dropped reason here, unlike in pair mode."""
     bam1, bam2, fasta_path, chrom, lo, hi, length, ref_mask, indel_window, no_rows, five_mer = task
     a, b = tile_scan_span(lo, hi, length, indel_window, five_mer)
     n = b - a
@@ -512,14 +489,14 @@ def _scan_trio_tile(task):
     cov2, base2, dis2, del2, ins2 = scan_region(_opened('bam', bam2), chrom, a, b)
     masked = ref_mask.mask_array(chrom, a + 1, b) if ref_mask is not None else None
 
-    line = cov1 | cov2                      # a pileup line exists if either sample has reads
+    line = cov1 | cov2                      # covered if either sample has reads
     if masked is not None:
         line &= ~masked
 
     nd1, dl1, in1, ds1 = _sample_problems(cov1, del1, ins1, dis1)
     nd2, dl2, in2, ds2 = _sample_problems(cov2, del2, ins2, dis2)
-    # quality_check takes the union of both samples' problems and reports the first
-    # of deletion, insertion, no_depth, reads_disagree -- an order of its own.
+    # A problem in either sample drops the line; it is reported as the first of
+    # deletion, insertion, no_depth, reads_disagree (quality_check's order).
     any_del, any_ins = dl1 | dl2, in1 | in2
     any_nd, any_dis = nd1 | nd2, ds1 | ds2
     clean = line & ~any_del & ~any_ins & ~any_nd & ~any_dis
@@ -541,8 +518,7 @@ def _scan_trio_tile(task):
     else:
         mid = np.empty(0, np.int64)
 
-    # scan_windows needs three adjacent *lines* clean, not three bases. A gap is
-    # such a triple whose outer lines are not two apart.
+    # non_consecutive, as in pair mode.
     line_idx = np.flatnonzero(ln)
     line_clean = clean[inside][line_idx]
     if line_idx.size >= 3:
@@ -560,15 +536,15 @@ def _scan_trio_tile(task):
         near_counts = _near_counts(ref, base1, base2, mid[near])
         mid = mid[~near]
 
-    # As in pair mode: every base of the window, in the reference and both taxa, is A/C/G/T.
+    # Every base of the window, in the reference and both taxa, is A/C/G/T.
     acgt = _acgt((ref, base1, base2), mid, (-1, 0, 1))
     n_not_acgt = int((~acgt).sum())
     mid = mid[acgt]
     if five_mer:
         return _five_counts(ref, base1, base2, clean, mid)
 
-    # detect_mutation_triplet, vectorised. It compares characters and has no
-    # not_acgt class, so these stay raw bytes rather than the ACGT codes pair uses.
+    # detect_mutation_triplet's classes, on raw bytes. ref_differs (both taxa agree, the
+    # reference differs) cannot be assigned to a branch and is kept as a separate spectrum.
     r_p, r_c, r_n = ref[mid - 1], ref[mid], ref[mid + 1]
     a_c, b_c = base1[mid], base2[mid]
     flanks = ((r_p == base1[mid - 1]) & (r_p == base2[mid - 1])
@@ -584,8 +560,7 @@ def _scan_trio_tile(task):
 
     mut1, mut2, trip1, trip2, ref_diff = {}, {}, {}, {}, {}
     rows1 = rows2 = ''
-    # taxa1_mut, taxa2_mut and identical all contribute the reference 3-mer to both
-    # triplet tallies, exactly as detect_mutation_triplet does.
+    # taxa1_mut, taxa2_mut and identical add the reference 3-mer to both triplet tallies.
     counted = sel['taxa1_mut'] | sel['taxa2_mut'] | sel['identical']
     if counted.any():
         inv, names = _keyed((r_p[counted], r_c[counted], r_n[counted]),
@@ -620,13 +595,7 @@ def _scan_trio_tile(task):
 
 class BamTrioExtractor:
     """Trio mode: two taxa against the reference, scanned from the BAMs.
-
-    Writes exactly the files ParallelMutationExtractor writes -- the same two
-    mutation and two triplet JSONs, the same two CSVs, and the same
-    run_summary.json sections including reference_difference_spectrum.
-    Rows are written as tiles finish, so unlike the pileup path the parent never
-    holds a genome's worth of calls.
-    """
+    Writes the same files as ParallelMutationExtractor; rows are written as tiles finish."""
 
     def __init__(self, reference, taxon1, taxon2, ref_fasta, bams, mutation_output_dir,
                  triplet_output_dir, cores=None, no_full_mutations=False, no_cache=False,

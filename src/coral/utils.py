@@ -16,20 +16,16 @@ def run_cmd(cmd, shell=False, verbose = True):
         sys.exit(result.returncode)
 
 def run_cmd_raise(cmd, shell=False, verbose = True):
-    """Run command and raise RuntimeError on failure instead of exiting.
-    
-    Use this in library code paths where exceptions are preferred over sys.exit().
-    CLI code should catch exceptions and exit with code 1.
-    """
+    """Run a command and raise RuntimeError on failure instead of exiting."""
     log(f"Running: {' '.join(cmd) if isinstance(cmd, list) else cmd}", verbose)
     result = subprocess.run(cmd, shell=shell)
     if result.returncode != 0:
         raise RuntimeError(f"Command failed with exit code {result.returncode}: {cmd}")
 
 def run_cmd_retry(cmd, tries=5, base=5, cap=300, verbose=True):
-    """Run a command, retrying on failure with exponential backoff + full jitter.
+    """Run a command, retrying on failure with exponential backoff.
 
-    Full jitter (sleep in [0, base*2**attempt]) de-synchronizes many jobs that fail at once.
+    Random sleep in [0, base*2**attempt] keeps many jobs that fail at once from retrying together.
     """
     for attempt in range(tries):
         log(f"Running: {' '.join(cmd) if isinstance(cmd, list) else cmd}", verbose)

@@ -14,7 +14,6 @@ def write_phylip_infile(df, outfile):
         f.write(f"{len(taxa_cols)} {len(df)}\n")
         for col in taxa_cols:
             sequence = ''.join(df[col].astype(str).values).replace(' ', '-').upper()
-            # f.write(f"{col.ljust(30)}{sequence}\n")
             f.write(f"{col}     {sequence}\n")
 
 
@@ -30,38 +29,17 @@ def write_intree(tree, outfile):
 import re
 
 def find_phylip_executable(command):
-    """
-    Find PHYLIP executable in PATH (e.g., from conda installation).
-    
-    Args:
-        command: PHYLIP command name (e.g., 'dnapars')
-    
-    Returns:
-        str: Command name if found in PATH
-    
-    Raises:
-        FileNotFoundError: If executable cannot be found in PATH
-    """
-    # Check if command is available in PATH (conda installation)
+    """Return the PHYLIP command name if it is on PATH, else raise FileNotFoundError."""
     if shutil.which(command):
         return command
-    
-    # Not found in PATH
+
     raise FileNotFoundError(
         f"PHYLIP executable '{command}' not found in PATH.\n"
         f"Please install PHYLIP via conda: `conda install -c bioconda phylip`"
     )
 
 def check_phylip_available(command='dnapars'):
-    """
-    Check if PHYLIP is available in the system.
-    
-    Args:
-        command: PHYLIP command to check (default: 'dnapars')
-    
-    Returns:
-        bool: True if PHYLIP is available, False otherwise
-    """
+    """Return True if the PHYLIP command is on PATH."""
     try:
         find_phylip_executable(command)
         return True
@@ -69,15 +47,7 @@ def check_phylip_available(command='dnapars'):
         return False
 
 def extract_parsimony_score(outfile_path):
-    """
-    Extracts the parsimony score (total number of changes) from a PHYLIP outfile.
-
-    Args:
-        outfile_path (str): Path to the PHYLIP .outfile
-
-    Returns:
-        float: total number of changes
-    """
+    """Return the parsimony score (total number of changes) from a PHYLIP outfile."""
     with open(outfile_path, 'r') as f:
         for line in f:
             if "requires a total of" in line:
@@ -87,8 +57,7 @@ def extract_parsimony_score(outfile_path):
     raise ValueError(f"Could not find parsimony score in {outfile_path}")
 
 def run_phylip_command(df, output_dir, exe_path, tree=None, prefix="run1", phylip_input_args="Y\n", remove_infile=True, verbose=True):
-    # Only convert to absolute path if it's actually a path (contains path separators)
-    # If it's just a command name (e.g., "dnapars"), keep it as-is so PATH resolution works
+    # Make paths absolute (we chdir below); keep bare command names for PATH lookup
     if os.sep in exe_path or (os.altsep and os.altsep in exe_path):
         exe_path = os.path.abspath(exe_path)
     os.makedirs(output_dir, exist_ok=True)
@@ -140,7 +109,6 @@ def run_phylip_command(df, output_dir, exe_path, tree=None, prefix="run1", phyli
 def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, mapping, verbose=True):
     from ete3 import Tree
     df = load_random_rows(df_path, verbose=verbose).astype(str)
-    # df = pd.read_csv(df_path, index_col=0).astype(str)
     tree = Tree(tree_path, format=1) if tree_path else None
 
     if tree is not None and mapping is not None:
@@ -150,7 +118,6 @@ def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, ma
             else:
                 raise ValueError(f"Species name '{node.name}' not found in mapping.")
 
-    # Find PHYLIP executable in PATH
     exe_path = find_phylip_executable(command)
 
     no_tree_dir = os.path.join(output_dir, f"{prefix}_no_tree")
@@ -182,7 +149,7 @@ def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, ma
         log(f"PHYLIP outputs (with tree): {tree_output}", verbose)
 
         
-        # === Compare scores ===
+        # Compare the given tree with the most parsimonious tree
         default_score = extract_parsimony_score(default_output["outfile"])
         given_score = extract_parsimony_score(tree_output["outfile"])
 

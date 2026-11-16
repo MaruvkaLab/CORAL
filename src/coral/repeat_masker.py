@@ -1,21 +1,6 @@
-"""Repeat masking utilities for the CORAL pipeline.
+"""Repeat masking with WindowMasker (default) or RepeatMasker, stored as a RepeatMask of intervals.
 
-This module runs an external repeat masker on a genome and stores the resulting
-repeat intervals in a `RepeatMask`.
-
-The mask is used to:
-  * skip pseudo-reads whose fragment is mostly repetitive
-    (`Genome.generate_fragment_fastq`);
-  * skip pileup positions that fall inside repetitive regions of the outgroup.
-
-Two repeat-masking backends are supported:
-  * **windowmasker** (default) -- NCBI WindowMasker; de novo and
-    k-mer-frequency based, with no species-specific repeat library required.
-  * **repeatmasker** -- RepeatMasker; library-based and optionally configured
-    for a specific species or clade.
-
-Both backends are converted to the same interval representation, so downstream
-code is independent of the masking tool used.
+The mask drops mostly repetitive pseudo-reads and positions in repeats of the reference.
 """
 
 import os
@@ -47,9 +32,8 @@ def _merge(a):
 class RepeatMask:
     """Per-contig repeat intervals (1-based, inclusive) with fast lookup.
 
-    Coordinates are 1-based inclusive to match RepeatMasker `.out`, samtools
-    pileup positions, and CORAL's fragment read names -- so callers never convert.
-    An empty mask (no file / masking disabled) is falsy and passes everything.
+    1-based inclusive, as in RepeatMasker `.out`, pileup positions and CORAL's fragment
+    read names. An empty mask is falsy and masks nothing.
     """
 
     def __init__(self, intervals=None):
@@ -82,9 +66,7 @@ class RepeatMask:
         return i >= 0 and pos <= self._ends[chrom][i]
 
     def for_contig(self, chrom):
-        """A RepeatMask holding only `chrom`'s intervals (shares the underlying
-        lists, no copy). Lets the parallel extractor ship each worker just its
-        chromosome's mask instead of the whole genome's."""
+        """A RepeatMask holding only `chrom`'s intervals (shared, not copied)."""
         sub = RepeatMask()
         if chrom in self._starts:
             sub._starts[chrom] = self._starts[chrom]
@@ -92,19 +74,14 @@ class RepeatMask:
         return sub
 
     def for_span(self, chrom, start, end):
-        """A RepeatMask holding only the intervals of `chrom` that overlap the
-        1-based inclusive span [start, end] (shares the underlying arrays as
-        slice views, no copy). Lets the tiled extractor ship each worker just its
-        tile's mask instead of the whole chromosome's -- a chromosome's mask would
-        otherwise be pickled once per tile, and pickling a slice view sends only
-        the slice."""
+        """A RepeatMask holding only the intervals of `chrom` that overlap the 1-based
+        inclusive span [start, end], as slice views (not copied)."""
         sub = RepeatMask()
         starts = self._starts.get(chrom)
         if starts is None or len(starts) == 0:
             return sub
         ends = self._ends[chrom]
-        # Merged intervals are sorted in both arrays, so the overlapping ones are
-        # a contiguous slice -- the same bounds mask_array computes below.
+        # Merged intervals are sorted in both arrays, so the overlapping ones are a contiguous slice.
         first = int(ends.searchsorted(start, "left"))
         last = int(starts.searchsorted(end, "right"))
         if first < last:
@@ -114,11 +91,7 @@ class RepeatMask:
 
     def mask_array(self, chrom, start, end):
         """Bool array over the 1-based inclusive span [start, end]: True where masked.
-
-        `contains` per position costs a searchsorted each; the array scans are
-        given a whole tile at once, so the overlapping intervals are painted into
-        a difference array in one pass instead.
-        """
+        The overlapping intervals are marked in a difference array in one pass."""
         n = end - start + 1
         if n <= 0:
             return np.zeros(0, bool)
@@ -166,8 +139,8 @@ class RepeatMask:
         """Parse a RepeatMasker `.out` file into a RepeatMask.
 
         Columns (whitespace-delimited, 3 header lines): SW_score perc_div perc_del
-        perc_ins QUERY QBEGIN QEND q_left strand repeat class/family ... -- so the
-        query contig is field 5 and the 1-based inclusive span is fields 6-7."""
+        perc_ins QUERY QBEGIN QEND ...; the contig is field 5 and the 1-based inclusive
+        span is fields 6-7."""
         intervals = {}
         with open(out_path) as fh:
             for line in fh:
@@ -188,8 +161,8 @@ class RepeatMask:
     def from_windowmasker(cls, intervals_path):
         """Parse a WindowMasker `-outfmt interval` file into a RepeatMask.
 
-        Format: a `>contig` header line, then `start - end` lines whose coordinates
-        are 0-based inclusive -- so we shift both ends by +1 to our 1-based frame."""
+        Format: a `>contig` line, then `start - end` lines, 0-based inclusive; both ends
+        are shifted by +1."""
         intervals = {}
         chrom = None
         with open(intervals_path) as fh:

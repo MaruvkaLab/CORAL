@@ -8,7 +8,7 @@ def main():
     parser = argparse.ArgumentParser(description="Species Mutation Extraction CLI")
     subparsers = parser.add_subparsers(dest="subcmd")
 
-    # === Single-Pipeline ===
+    # run_trio: two sister species aligned to an outgroup
     trio = subparsers.add_parser("run_trio", aliases=["run_single"], help="Run 3-species pipeline (outgroup + 2)")
     trio.add_argument("--outgroup", nargs=2, metavar=("NAME", "ACCESSION"), required=True)
     trio.add_argument("--species", nargs=4, metavar=("NAME1", "ACC1", "NAME2", "ACC2"), required=True)
@@ -56,7 +56,7 @@ def main():
                              "range (with and without continuity) at which it is made, to Annotated/. "
                              "--mapq and --continuity are not used; standard spectra and plots are skipped")
 
-    # === Pair-Pipeline ===
+    # run_pair: one genome aligned to another
     pair = subparsers.add_parser("run_pair", help="Run 2-species pipeline (reference + target), 52 undirected classes")
     pair.add_argument("--reference", nargs=2, metavar=("NAME", "ACCESSION"), required=True)
     pair.add_argument("--target", nargs=2, metavar=("NAME", "ACCESSION"), required=True)
@@ -126,7 +126,7 @@ def main():
                        help="Number of cores to use. Default: use all available cores. "
                        "--cores 1 runs everything serially.")
 
-    # --- parallelism (run_multi is parallel by default; these switch it off) ---
+    # Parallelism (run_multi is parallel by default; these switch it off)
     multi.add_argument("--no-parallel", action="store_true",
                        help="Run the mutation extraction serially: whole-genome pileup, "
                             "serial scan, recursive per-row Fitch.")
@@ -141,7 +141,7 @@ def main():
                        help="Memory budget for the whole run. Caps the worker count of "
                             "each stage.")
 
-    # === Run PHYLIP ===
+    # run_phylip
     phylip = subparsers.add_parser("run_phylip", help="Run PHYLIP on mutation matrix")
     phylip.add_argument("--df", required=True, help="Path to matching_bases.csv.gz")
     phylip.add_argument("--tree", required=True, help="Path to annotated_tree.nwk")
@@ -186,6 +186,7 @@ def main():
             pipeline.run()
 
         elif args.subcmd == "run_pair":
+            # The reference takes the outgroup slot; the target is the only aligned genome
             pipeline = MutationExtractionPipeline(
                 species_list=[(args.target[0], args.target[1])],
                 outgroup=(args.reference[0], args.reference[1]),

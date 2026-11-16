@@ -31,13 +31,7 @@ _CLEAN_RE = re.compile(r'\^.|\$|[+-](\d*)')
 
 def clean_bases(s):
     """Strip read-start/end markers and indel notation from an mpileup bases field.
-
-    Fast path: every marker this removes (^x, $, +N…, -N…) contains one of the
-    four characters ^ $ + - . When none are present — the overwhelmingly common
-    case for CORAL's shallow pileups — the regex below matches nothing and would
-    return s unchanged, so we skip it entirely. This is byte-for-byte identical
-    to the regex path but avoids the regex-engine call and list building.
-    """
+    A field with none of ^ $ + - (the common case) is returned as is."""
     if '^' not in s and '$' not in s and '+' not in s and '-' not in s:
         return s
     out = []
@@ -56,9 +50,7 @@ def clean_bases(s):
 
 
 class PileupLine:
-    """Wraps one parsed pileup row. clean_bases() has a cheap fast path (see
-    above), so re-cleaning a field costs a few membership tests; we skip the
-    per-line cache dict that this used to allocate on every one of ~10^8 lines."""
+    """One parsed pileup row."""
     __slots__ = ('fields',)
 
     def __init__(self, fields):
@@ -140,11 +132,11 @@ def has_indel(depth, bases):
 
 
 def scan_windows(lines, parse, clean, event=None, indel_window=1, masked=None, combine=max, stats=None):
-    """ Yield clean 3-base windows from ordered pileup lines. Each yielded item is ``(window, near)``, 
-    where ``window`` contains three consecutive clean, non-masked positions from the same chromosome. 
-    If ``indel_window == 1``, ``near`` is always None and windows are yielded immediately. 
-    If ``indel_window = k > 1``, ``near`` combines events found within k bp of the middle base, including events on masked lines. 
-    ``stats`` tracks non-masked lines, masked lines, and clean but non-consecutive 3-line windows. """
+    """Yield (window, near) for each run of three consecutive clean, unmasked pileup lines on one chromosome.
+
+    With indel_window k > 1, `near` combines the indel events within k bp of the middle base, masked lines
+    included; with k = 1 it is None. `stats` counts unmasked lines, masked lines, and clean 3-line runs
+    whose positions are not consecutive (non_consecutive)."""
     if indel_window < 1:
         raise ValueError(f"indel_window must be at least 1, got {indel_window}")
     k = indel_window
@@ -233,7 +225,7 @@ def detect_mutation_triplet(triplets):
 
 
 def _masked_line(ref_mask):
-    """-> raw pileup line -> True if its (chrom, 1-based pos) is a reference repeat. """
+    """A function: raw pileup line -> True if its (chrom, 1-based pos) is in a reference repeat."""
     def masked(line):
         t1 = line.find('\t')
         t2 = line.find('\t', t1 + 1)
@@ -242,17 +234,11 @@ def _masked_line(ref_mask):
 
 
 def scan_pileup(line_iter, on_mut1=None, on_mut2=None, ref_mask=None, indel_window=1):
-    """Single linear scan over pileup lines with a 3-position sliding window.
+    """Trio scan of a pileup with a 3-position sliding window.
 
-    Returns (mut1, mut2, triplet1, triplet2, classes) count dicts. For each detected
-    mutation calls on_mut1/on_mut2(chrom, pos, mutation) when provided — the
-    serial path uses these to stream CSV rows, the parallel path to collect
-    them. This is the single source of truth for the scan: both the serial
-    MutationExtractor and the parallel driver call it, so their results cannot
-    diverge. When `ref_mask` is given, positions inside reference repeats are
-    dropped before the scan so no call is made there. With indel_window k > 1,
-    windows whose middle is within k bp of an indel in any read are left out too 
-    (k = 1: only the window's own three bases, as always).
+    Returns (mut1, mut2, trip1, trip2, summary, ref_diff) and calls on_mut1/on_mut2(chrom, pos, mutation)
+    for each call. Positions in `ref_mask` repeats are dropped. With indel_window k > 1, windows whose
+    middle is within k bp of an indel in any read are dropped; with k = 1 only the window's own bases count.
     """
     mut1 = defaultdict(int)
     mut2 = defaultdict(int)
@@ -276,6 +262,8 @@ def scan_pileup(line_iter, on_mut1=None, on_mut2=None, ref_mask=None, indel_wind
         m1, m2, t1, t2, site_class = detect_mutation_triplet(triplets)
         classes[site_class] += 1
         if site_class == 'ref_differs':
+            # Both taxa agree and the reference differs: not assigned to a branch, but kept
+            # as the reference difference spectrum, written taxa base > reference base.
             sis = triplets[TAXA1_IDX][CUR_IDX]
             ref_diff[f"{triplets[REF_IDX][PREV_IDX]}[{sis}>{triplets[REF_IDX][CUR_IDX]}]{triplets[REF_IDX][NEXT_IDX]}"] += 1
         chrom = line_fields[1][CHR_IDX]
@@ -345,11 +333,11 @@ def pair_check(line, dropped=None):
 
 
 def scan_pair(line_iter, on_mut=None, ref_mask=None, indel_window=1):
-    """scan_pileup for one target against the reference. A window is called if its three bases are clean in the
-    target and ACGT in both, the flanks are the same and the middle differs; the call is folded to one of 52
-    undirected classes. on_mut(chrom, pos, change, mutation) gets the change as seen from the reference, e.g. A[C>T]G,
-    and its class. Returns (mutations, triplets, summary); triplets counts every called or identical window once,
-    half to the reference 3-mer and half to the target 3-mer, so it does not depend on which genome is the reference."""
+    """Pair scan of a one-sample pileup. A window is called if its three bases are clean in the target and
+    A/C/G/T in both genomes, the flanks are identical and the middle differs; calls are folded to 52 classes.
+    on_mut(chrom, pos, change, mutation) gets the change seen from the reference (e.g. A[C>T]G) and its class.
+    Returns (mutations, triplets, summary). Each called or identical window counts half to the reference
+    3-mer and half to the target 3-mer, so triplets do not depend on which genome is the reference."""
     muts = defaultdict(int)
     trips = defaultdict(int)
     classes = defaultdict(int)
@@ -500,10 +488,8 @@ def _read_fai_chroms(fai_path):
 
 
 def _chroms_with_reads(bams):
-    """Union of reference names with >=1 mapped read in any BAM, via
-    `samtools idxstats` (reads only the index, near-instant). Chromosomes absent
-    here produce no pileup lines, so skipping them cannot change any output -- it
-    just avoids launching an mpileup for empty scaffolds."""
+    """Reference names with at least one mapped read in any BAM (`samtools idxstats`).
+    Contigs without reads produce no pileup lines, so skipping them changes no output."""
     have = set()
     for bam in bams:
         out = subprocess.run(["samtools", "idxstats", bam],
@@ -516,10 +502,9 @@ def _chroms_with_reads(bams):
 
 
 def _region_pileup(chrom, ref_fasta, bams, scan):
-    """Generate this chromosome's pileup via index-based `samtools mpileup -r <chrom>`
-    (so no worker ever streams the whole file) and return scan(stream). The mpileup
-    options match Pileup.generate exactly (-B -d 100), so a chromosome's output is
-    byte-identical to its slice of the whole-genome pileup."""
+    """Pile up one chromosome with `samtools mpileup -r <chrom>` and return scan(stream).
+    The options match Pileup.generate (-B -d 100), so the output is that chromosome's slice
+    of the whole-genome pileup."""
     cmd = ["samtools", "mpileup", "-f", ref_fasta, "-B", "-d", "100", "-r", chrom] + list(bams)
     with tempfile.TemporaryFile() as errf:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf)
@@ -536,8 +521,7 @@ def _region_pileup(chrom, ref_fasta, bams, scan):
 
 
 def _extract_region(chrom, ref_fasta, bams, no_full_mutations, ref_mask=None, indel_window=1):
-    """Worker: scan this chromosome's pileup with the shared scan_pileup.
-    Returns (chrom, count dicts, CSV rows)."""
+    """Worker: scan one chromosome's pileup with scan_pileup. Returns (chrom, count dicts, CSV rows, summary, ref_diff)."""
     rows1 = []
     rows2 = []
     on1 = on2 = None
@@ -560,12 +544,9 @@ def _extract_pair_region(chrom, ref_fasta, bam, ref_mask=None, indel_window=1):
 
 
 class ParallelMutationExtractor:
-    """Chromosome-parallel drop-in for MutationExtractor producing identical
-    output files. One task per chromosome generates that chromosome's pileup
-    directly from the indexed BAMs (`samtools mpileup -r`) and scans it, so no
-    worker reads the whole genome; a pool runs them concurrently and results are
-    merged (counts summed, CSV rows concatenated in reference/.fai order). Only
-    chromosomes that actually carry reads are processed."""
+    """MutationExtractor run per chromosome in a pool, with the same output files.
+    Each task piles up one chromosome with reads from the indexed BAMs and scans it;
+    counts are summed and CSV rows written in .fai order."""
 
     def __init__(self, reference, taxon1, taxon2, ref_fasta, bams, mutation_output_dir, triplet_output_dir,
                  fai_path, cores, no_full_mutations=False, no_cache=False, verbose=True, ref_mask=None, indel_window=1):
@@ -606,14 +587,12 @@ class ParallelMutationExtractor:
         chrom_lengths = _read_fai_chroms(self.fai_path)
         chrom_order = [c for c, _ in chrom_lengths]
         with_reads = _chroms_with_reads(self.bams)
-        # one task per chromosome that carries reads, longest-first so the big
-        # ones start early and dominate the makespan; empty scaffolds are skipped.
+        # One task per chromosome with reads, longest first.
         tasks = [c for c, _ in sorted(chrom_lengths, key=lambda cl: cl[1], reverse=True) if c in with_reads]
         n_workers = max(1, min(self.cores, len(tasks) or 1))
         log(f"Extracting mutations in parallel: {len(tasks)} chromosomes with reads over {n_workers} workers...", self.verbose)
 
-        # ship each worker only its chromosome's slice of the mask, not the whole
-        # genome's (a genome-scale mask is ~10^6 intervals -> costly to pickle N times).
+        # Each worker gets only its chromosome's slice of the mask.
         args = [(c, self.ref_fasta, self.bams, self.no_full_mutations,
                  self.ref_mask.for_contig(c) if self.ref_mask else None, self.indel_window) for c in tasks]
         if not args:
@@ -621,10 +600,7 @@ class ParallelMutationExtractor:
         elif n_workers <= 1:
             results = [_extract_region(*a) for a in args]
         else:
-            # chunksize=1: dispatch one chromosome per grab so the few big arms
-            # land on different workers. The default chunksize bundles contiguous
-            # (here longest-first) tasks, which would pile every big chromosome
-            # onto a single worker and serialize the heavy work.
+            # chunksize=1, so the largest chromosomes go to different workers.
             with multiprocessing.Pool(n_workers) as pool:
                 results = pool.starmap(_extract_region, args, chunksize=1)
 
@@ -746,6 +722,7 @@ class PairExtractor:
 
 
 class FiveMerExtractor:
+    """Trio 5-mer mutation counts from the whole-genome pileup."""
     def __init__(self, reference, taxon1, taxon2, pileup_file, output_dir, no_cache=False, verbose=True):
         self.reference = reference
         self.taxon1 = taxon1
@@ -809,6 +786,7 @@ class FiveMerExtractor:
 
 
 class TripletExtractor:
+    """Trio reference 3-mer counts at callable windows from the whole-genome pileup."""
     def __init__(self, reference, taxon1, taxon2, pileup_file, output_dir, no_cache=False, verbose=True):
         self.reference = reference
         self.taxon1 = taxon1
@@ -897,6 +875,7 @@ class PairNormalizer:
 
 
 class MutationNormalizer:
+    """Trio spectra: collapse to 96 classes, normalize by the 32 collapsed 3-mer counts and scale to 10,000."""
     complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C'}
     valid_bases = {'A', 'C', 'G', 'T'}
     mutation_pattern = re.compile(r"^[ACGT]\[[ACGT]>[ACGT]\][ACGT]$")

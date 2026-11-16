@@ -11,17 +11,15 @@ from typing import Optional, TextIO
 import matplotlib.pyplot as plt
 
 
-# Constants
 LOW_MAPQ_THRESHOLD = 1
 DEFAULT_MAPQ_THRESHOLD = 60
 DEFAULT_OFFSET = 75
 
 
 def has_bam_index(bam_path):
-    """Both alignment paths index with -c, so they write a .csi: a .bai cannot
-    address a contig over 512 Mb. A BAM from an earlier run may still carry a
-    .bai, and either lets pysam and `mpileup -r` seek, so either satisfies a
-    cache check."""
+    """True if the BAM has a .csi or .bai index.
+
+    CORAL writes .csi (a .bai cannot address contigs over 512 Mb), but either one works."""
     return os.path.exists(bam_path + '.bai') or os.path.exists(bam_path + '.csi')
 
 
@@ -39,6 +37,7 @@ def filter_sam(
     verbose: bool = True,
     log_path: Optional[str] = None,
 ):
+    """Keep reads with MAPQ >= mapq_threshold (no continuity rule)."""
     total_reads = 0
     kept_reads = 0
     filtered_mapq = 0
@@ -96,8 +95,7 @@ def filter_sam(
             print(msg, file=sys.stderr)
             log_to_file(log_path, msg)
 
-    # The caller may close the underlying pipe right after this returns, which
-    # would drop whatever is still buffered here (the last reads of the run).
+    # Flush before the caller closes the pipe, or the last buffered reads are lost
     output_stream.flush()
     write_summary()
     plot_histogram()
@@ -128,8 +126,12 @@ def with_continuity_filter_sam(
     log_path: Optional[str] = None,
     continuity_run: int = 2,
 ):
-    # A read below mapq_threshold is kept if it is part of a run of at least continuity_run
-    # consecutive fragments, each overlapping the next on the reference (2: a neighbour overlaps it).
+    """Keep MAPQ >= mapq_threshold reads, and reads with low_mapq <= MAPQ < mapq_threshold
+    that overlap on the reference with a neighbouring pseudo-read (upstream or downstream).
+
+    Input must be in pseudo-read (query) order, as written by the aligner. continuity_run > 2
+    requires a longer run of consecutive pseudo-reads, each overlapping the next.
+    Secondary alignments and unplaced or alternative contigs are excluded."""
     if continuity_run < 2:
         raise ValueError("continuity_run must be at least 2")
     total_reads = 0
@@ -177,6 +179,7 @@ def with_continuity_filter_sam(
             log(msg, verbose)
             log_to_file(log_path, msg)
 
+    # Each item is all alignments of one pseudo-read: before = already emitted, after = pending
     before = deque(maxlen=continuity_run - 1)
     after = deque()
     cur_reads = []
@@ -191,6 +194,7 @@ def with_continuity_filter_sam(
         raise
 
     def run_length(read, fragments):
+        # Longest chain of overlapping alignments from read through the following pseudo-reads
         chain = [[read]] + fragments
         run = [1] * len(chain[-1])
         for j in range(len(chain) - 2, -1, -1):
@@ -212,6 +216,7 @@ def with_continuity_filter_sam(
                 kept_reads += 1
                 kept_high_mapq += 1
                 continue
+            # Rescue if the run to the right, or both sides joined at this read, is long enough
             right = run_length(read, list(after))
             if right >= continuity_run or run_length(read, list(reversed(before))) + right - 1 >= continuity_run:
                 output_sam.write(read)
@@ -272,9 +277,8 @@ def annotate_sam(
     verbose: bool = True,
     log_path: Optional[str] = None,
 ):
-    """Writes every primary mapped read with MAPQ >= low_mapq and adds an
-    integer tag: the highest MAPQ of a neighbouring fragment that overlaps this
-    read on the same reference, or -1 if none. """
+    """Write every primary mapped read with MAPQ >= low_mapq, tagged with the highest MAPQ
+    of an overlapping neighbouring pseudo-read (-1 if none)."""
     total_reads = written = filtered_poor_mapping = filtered_mapq = filtered_chrom = 0
     skip_contigs = {'Un', 'random', 'alt', 'fix', 'hap'}
 
@@ -365,8 +369,7 @@ class Aligner:
         self.bam_dir = f"{self.output_dir}/BAMs"
         self.plots_dir = f"{self.output_dir}/Plots"
         self.raw_bam = f"{self.bam_dir}/{self.species}_to_{self.reference}_raw.bam"
-        # annotate: annotate_sam replaces the MAPQ filter (all reads >= low_mapq, ZN tag).
-        # Separate final BAM name so annotated and filtered BAMs never share a cache.
+        # annotate: annotate_sam replaces the MAPQ filter; own BAM name so the caches never mix
         self.annotate = annotate
         suffix = "_annotated" if annotate else ""
         self.final_bam = f"{self.bam_dir}/{self.species}_to_{self.reference}{suffix}.bam"
@@ -392,7 +395,6 @@ class Aligner:
             "bwa": "bwa mem -t {cores} {ref} {fq}",
             "bwa-mem2": "bwa-mem2 mem -t {cores} {ref} {fq}",
             "minimap2": "minimap2 -t {cores} -ax sr {ref} {fq}",
-            #"bbmap": "bbmap.sh ref={ref} threads={cores} in={fq} out=stdout.sam"
             "bbmap": "bbmap.sh ref={ref} threads={cores} in={fq} out=stdout.sam ordered=t path={tmp}"
 
         }
@@ -466,7 +468,7 @@ class Aligner:
         return self.final_bam
 
     def align_disk_cached(self, mapq=60, low_mapq=1, continuity = True, continuity_run=2):
-        # Step 1: Align and sort raw.bam
+        # Step 1: align to an unsorted raw BAM (query order, as the filters need)
         if not os.path.exists(self.raw_bam) or self.no_cache:
             cmd = self.aligner_cmd_template \
             .replace("{ref}", self.reference_fasta) \

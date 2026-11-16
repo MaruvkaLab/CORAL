@@ -1,7 +1,7 @@
 """Annotate mode: record, for every site, the MAPQ thresholds at which it is callable.
 
-A read is kept at threshold t if MAPQ >= t, or with continuity if ZN >= 0.
-A site is callable when its kept reads agree on one base and none has '*' or '+'.
+A read is kept at threshold t if MAPQ >= t or, with the continuity rule, if ZN >= 0 (it overlaps a
+neighbouring pseudo-read). A site is callable when its kept reads agree on one base and none has '*' or '+'.
 With an indel window k > 1, each window also records indel_mapq: the highest MAPQ (256 when rescued by
 continuity) of a read with '*' or '+' within k bp of the middle base.
 """
@@ -79,6 +79,7 @@ def site_intervals(depth, bases, mapqs, zns):
 
 
 def _parse_annotated(line, species_cols=SPECIES_COLS):
+    """-> (chrom, pos, reference base, per-sample site_intervals), or None for a malformed line."""
     parts = line.rstrip('\n').split('\t')
     if len(parts) != 3 + 5 * len(species_cols):
         return None
@@ -189,7 +190,7 @@ def _call_writer(calls, names):
 
 def _annotate_region(task):
     """One chromosome: pile it up, scan it, and write its calls to their own file.
-    Splitting here is exact -- scan_windows never builds a window across two chromosomes."""
+    Splitting by chromosome changes nothing, as no window spans two chromosomes."""
     chrom, ref_fasta, bams, ref_mask, indel_window, n_species, names, rows_path = task
     cmd = mpileup_cmd(ref_fasta, bams, region=chrom, annotate=True)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -237,10 +238,8 @@ def write_annotated_outputs(pileup_path, output_dir, reference, *taxa, ref_mask=
     One taxon is a pair: the calls hold the change seen from the reference, as in a
     pair run's mutations.csv.gz, and the site classes are scan_pair's.
 
-    Given ref_fasta, bams and cores > 1 the whole-genome pileup at pileup_path is never
-    read: each chromosome is piled up and scanned in its own process instead, for the
-    same outputs. A whole-genome scan is single-threaded and, on a 734 Mb reference,
-    hours slower."""
+    Given ref_fasta, bams and cores > 1, pileup_path is not read: each chromosome is piled
+    up and scanned in its own process instead, for the same outputs."""
     os.makedirs(output_dir, exist_ok=True)
     stem = os.path.join(output_dir, "__".join((reference,) + taxa))
     calls_path, counts_path = f"{stem}__calls.csv.gz", f"{stem}__site_counts.tsv.gz"
