@@ -821,5 +821,6 @@ class MultiSpeciesMutationPipeline:
             prefix="multi_species_phylip",
             input_string="5\nY\n",
             mapping=self.terminal_mapping,
-            verbose=self.verbose
+            verbose=self.verbose,
+            no_cache=self.no_cache
         )
