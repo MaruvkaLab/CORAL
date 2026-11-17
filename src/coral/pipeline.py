@@ -517,6 +517,7 @@ class MultiSpeciesMutationPipeline:
         max_memory_mb=None,
         skip_no_tree=False,
         node_sequences=True,
+        given_tree_sites=None,
         **kwargs,
     ):
         if newick_tree is None and species_list is None:
@@ -540,6 +541,7 @@ class MultiSpeciesMutationPipeline:
         self.max_memory_mb = max_memory_mb
         self.skip_no_tree = skip_no_tree
         self.node_sequences = node_sequences
+        self.given_tree_sites = given_tree_sites
 
         kwargs["cores"] = self.cores
         self.params = kwargs
@@ -803,7 +805,8 @@ class MultiSpeciesMutationPipeline:
             mapping=self.terminal_mapping,
             verbose=self.verbose,
             no_cache=self.no_cache,
-            skip_no_tree=self.skip_no_tree
+            skip_no_tree=self.skip_no_tree,
+            given_tree_sites=self.given_tree_sites,
         )
 
 

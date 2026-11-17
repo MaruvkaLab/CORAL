@@ -87,6 +87,11 @@ def main():
                             "option 5 (print sequences at all nodes). CORAL never reads that "
                             "table, and on large runs it is what runs out of memory; the tree, "
                             "the edge table and the score are unchanged.")
+    multi.add_argument("--given-tree-sites", type=int, default=None, metavar="N",
+                       help="With --newick-tree, run PHYLIP on the given tree with a seeded "
+                            "subsample of N of its sites. CORAL reads only the tree and the "
+                            "edge table from that run, which come from the given tree; the "
+                            "score changes and is no longer compared. Fitch still uses every site.")
 
     # --- split jobs: one HTCondor job per species for the alignment (see split_jobs.py) ---
     split = multi.add_argument_group(
@@ -172,6 +177,10 @@ def main():
                 parser.error("--skip-no-tree needs --newick-tree")
             if args.no_node_sequences and not args.newick_tree:
                 parser.error("--no-node-sequences needs --newick-tree")
+            if args.given_tree_sites is not None and not args.newick_tree:
+                parser.error("--given-tree-sites needs --newick-tree")
+            if args.given_tree_sites is not None and args.given_tree_sites < 1:
+                parser.error("--given-tree-sites must be a positive number of sites")
             pipeline = MultiSpeciesMutationPipeline(
                 newick_tree=args.newick_tree,
                 species_list=args.species_list,
@@ -194,6 +203,7 @@ def main():
                 max_memory_mb=args.max_memory_mb,
                 skip_no_tree=args.skip_no_tree,
                 node_sequences=not args.no_node_sequences,
+                given_tree_sites=args.given_tree_sites,
             )
             if args.split_jobs or args.split_stage:
                 from .split_jobs import dispatch
