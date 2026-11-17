@@ -71,52 +71,25 @@ class Genome:
 
 
 
-    def index(self, aligner="bwa"):
-        log(f"Indexing genome for {self.name} with {aligner}...", self.verbose)
-
-        aligner = (aligner or "").lower()
-
-        # Only the BWA family needs an explicit index; minimap2 and bbmap index in memory.
-        if aligner not in {"bwa", "bwa-mem2"}:
-            # samtools still needs the FASTA index
-            fai = f"{self.fasta_path}.fai"
-            if not os.path.exists(fai) or self.no_cache:
-                if os.path.exists(fai):
-                    os.remove(fai)
-                run_cmd(["samtools", "faidx", self.fasta_path], verbose=self.verbose)
-            log(f"No explicit index required for aligner '{aligner}'.", self.verbose)
+    def index(self, index_cmd=None, cores=1, force=False):
+        """Index this genome as a reference: the samtools .fai and, with index_cmd (see alignment_manager.ALIGNERS),
+        the aligner's index, each built once. <fasta>.coral_index records the command that built the index, so an
+        index from another command, or an unfinished one, is rebuilt."""
+        if force or not os.path.exists(f"{self.fasta_path}.fai"):
+            run_cmd(["samtools", "faidx", self.fasta_path], verbose=self.verbose)
+        if not index_cmd:
             return
-
-        if aligner == "bwa-mem2":
-            # bwa-mem2 writes no .sa; requiring one would re-index on every run
-            required_exts = ["0123", "amb", "ann", "bwt.2bit.64", "pac"]
-            index_cmd = ["bwa-mem2", "index", self.fasta_path]
-        else:
-            # classic bwa index files
-            required_exts = ["amb", "ann", "bwt", "pac", "sa"]
-            index_cmd = ["bwa", "index", self.fasta_path]
-
-        required_all = [f"{self.fasta_path}.{ext}" for ext in required_exts]
-        required_all.append(f"{self.fasta_path}.fai")
-
-        all_exist = all(os.path.exists(p) for p in required_all)
-
-        if all_exist and not self.no_cache:
-            log(f"Index files already exist for {self.name}. Skipping indexing.", self.verbose)
+        marker = f"{self.fasta_path}.coral_index"
+        if not force and os.path.exists(marker) and open(marker).read() == index_cmd:
+            log(f"Index already built for {self.name}.", self.verbose)
             return
-
-        # Remove stale index files before re-indexing
-        for ext in required_exts + ["fai"]:
-            path = f"{self.fasta_path}.{ext}"
-            if os.path.exists(path):
-                os.remove(path)
-
-        run_cmd(index_cmd, verbose=self.verbose)
-
-        run_cmd(["samtools", "faidx", self.fasta_path], verbose=self.verbose)
-
-        log(f"Indexing complete for {self.name}", self.verbose)
-
+        if os.path.exists(marker):
+            os.remove(marker)
+        cmd = (index_cmd.replace("{refdir}", os.path.dirname(os.path.abspath(self.fasta_path)))
+               .replace("{ref}", self.fasta_path).replace("{cores}", str(cores)))
+        run_cmd(["bash", "-o", "pipefail", "-c", cmd], verbose=self.verbose)
+        with open(marker, "w") as f:
+            f.write(index_cmd)
 
     def generate_fragment_fastq(self, length=150, output_fastq = None, offset=75, force=False,
                                 repeat_mask=None, mask_frac=0.5):

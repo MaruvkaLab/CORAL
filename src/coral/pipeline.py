@@ -13,7 +13,7 @@ except ImportError:
 import pandas as pd
 from .cleanup_manager import PipelineCleaner
 from .genome_manager import Genome
-from .alignment_manager import Aligner
+from .alignment_manager import Aligner, aligner_commands
 from .bam_extractor import BamPairExtractor, BamTrioExtractor
 from .multiple_species_mutation_extractor_manager import MultipleSpeciesMutationExtractor
 from .mutation_extractor_manager import MutationNormalizer, PairNormalizer, TripletExtractor
@@ -78,6 +78,7 @@ class MutationExtractionPipeline:
                  outgroup,
                  aligner_name="bwa", 
                  aligner_cmd=None,
+                 index_cmd=None,
                  base_output_dir="../Output", 
                  no_cache = False,
                  verbose = True, 
@@ -93,6 +94,7 @@ class MutationExtractionPipeline:
         self.outgroup = outgroup          # (name, accession)
         self.aligner_name = aligner_name
         self.aligner_cmd = aligner_cmd
+        self.index_cmd = index_cmd
         self.run_id = run_id
         if run_id is None:
             self.run_id = '__'.join([species[0] for species in [outgroup] + species_list])
@@ -231,6 +233,7 @@ class MutationExtractionPipeline:
             "taxa": [name for name, _ in self.species_list],
             "parameters": {k: v for k, v in self.params.items()
                            if v is None or isinstance(v, (str, int, float, bool))},
+            "aligner_commands": aligner_commands(self.aligner_name, self.aligner_cmd, self.index_cmd),   # (index, align)
             "versions": _tool_versions(),
         }
         data["genomes"] = getattr(self, "genome_stats", {})
@@ -265,7 +268,8 @@ class MutationExtractionPipeline:
         if not hasattr(self, "downloaded"):     # called on its own, not through run()
             self.download_genomes()
         # Reference genome (outgroup)
-        self.reference.index(aligner=self.aligner_name)
+        self.reference.index(aligner_commands(self.aligner_name, self.aligner_cmd, self.index_cmd)[0],
+                             self.params.get("cores") or 1, force=self.no_cache)
         # Normal runs drop calls at outgroup repeats; annotate mode flags them.
         self.reference_mask = self._build_repeat_mask(
             self.reference, force=self.params.get("annotate", False))
@@ -290,7 +294,8 @@ class MutationExtractionPipeline:
                 reference_genome=self.reference,
                 base_output_dir=self.output_dir,
                 aligner_cmd=self.aligner_cmd,
-                aligner_name=self.aligner_name,              
+                aligner_name=self.aligner_name,
+                index_cmd=self.index_cmd,
                 cores=self.params.get("cores", None),
                 verbose=self.verbose,
                 annotate=self.params.get("annotate", False),
@@ -527,6 +532,7 @@ class MultiSpeciesMutationPipeline:
         outgroup=None,
         aligner_name="bwa", 
         aligner_cmd=None,
+        index_cmd=None,
         no_cache=False,
         verbose=True,
         cores=None,
@@ -546,6 +552,7 @@ class MultiSpeciesMutationPipeline:
         self.output_dir = os.path.join(self.base_output_dir, self.run_id)
         self.aligner_name=aligner_name
         self.aligner_cmd=aligner_cmd
+        self.index_cmd=index_cmd
         self.no_cache = no_cache
         self.verbose = verbose
 
@@ -665,7 +672,8 @@ class MultiSpeciesMutationPipeline:
             genome.download()
 
             if species == self.outgroup_name:
-                genome.index(aligner=self.aligner_name)
+                genome.index(aligner_commands(self.aligner_name, self.aligner_cmd, self.index_cmd)[0],
+                             self.cores, force=self.no_cache)
                 self.reference = genome
             else:
                 genome.generate_fragment_fastq(
@@ -694,6 +702,7 @@ class MultiSpeciesMutationPipeline:
                 base_output_dir=self.output_dir,
                 aligner_cmd=self.aligner_cmd,
                 aligner_name=self.aligner_name,
+                index_cmd=self.index_cmd,
                 cores=self.params.get('cores', None),
                 verbose=self.verbose
             )
@@ -729,6 +738,7 @@ class MultiSpeciesMutationPipeline:
                 base_output_dir=self.output_dir,
                 aligner_cmd=self.aligner_cmd,
                 aligner_name=self.aligner_name,
+                index_cmd=self.index_cmd,
                 cores=n_threads,
                 verbose=self.verbose,
             )

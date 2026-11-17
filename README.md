@@ -144,6 +144,7 @@ fine; calling it from `python -c` or from stdin is not.
 The continuity filter treats consecutive records as neighbouring fragments of the source genome, so an aligner that reorders its output silently breaks the filter.
 BWA, BWA-MEM2 and minimap2 preserve input order by default.
 BBMap does not, so its command must include `ordered=t`.
+The reference is indexed once per run; a custom aligner gives its index command with `--index-cmd` (placeholders `{ref}`, `{refdir}` and `{cores}`).
 
 **MAPQ scale.** The default `--mapq 60` follows the BWA MAPQ scale. Other aligners may use different scales (e.g., BBMap never reports 60), so adjust `--mapq` and `--low-mapq` accordingly.
 

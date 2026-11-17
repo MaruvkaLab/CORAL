@@ -20,7 +20,10 @@ def main():
     trio.set_defaults(verbose=True)
     trio.add_argument("--suffix", default=None)
     trio.add_argument("--aligner-name", default="bwa")
-    trio.add_argument("--aligner-cmd", default=None)
+    trio.add_argument("--aligner-cmd", default=None,
+                        help="Custom alignment command, writing SAM in input order")
+    trio.add_argument("--index-cmd", default=None,
+                        help="Command that indexes the reference, run once")
     trio.add_argument("--streamed", action="store_true")
     trio.add_argument("--mapq", type=int, default=60)
     trio.add_argument("--low-mapq", type=int, default=1)
@@ -68,7 +71,10 @@ def main():
     pair.set_defaults(verbose=True)
     pair.add_argument("--suffix", default=None)
     pair.add_argument("--aligner-name", default="bwa")
-    pair.add_argument("--aligner-cmd", default=None)
+    pair.add_argument("--aligner-cmd", default=None,
+                        help="Custom alignment command, writing SAM in input order")
+    pair.add_argument("--index-cmd", default=None,
+                        help="Command that indexes the reference, run once")
     pair.add_argument("--streamed", action="store_true")
     pair.add_argument("--mapq", type=int, default=60)
     pair.add_argument("--low-mapq", type=int, default=1)
@@ -108,7 +114,10 @@ def main():
     multi.set_defaults(verbose=True)
     multi.add_argument("--outgroup", default=None)
     multi.add_argument("--aligner-name", default="bwa")
-    multi.add_argument("--aligner-cmd", default=None)
+    multi.add_argument("--aligner-cmd", default=None,
+                        help="Custom alignment command, writing SAM in input order")
+    multi.add_argument("--index-cmd", default=None,
+                        help="Command that indexes the reference, run once")
     multi.add_argument("--streamed", action="store_true")
     continuity_group_multi = multi.add_mutually_exclusive_group()
     continuity_group_multi.add_argument("--continuity", action="store_true", default=True, help="Enable continuity mode (default)")
@@ -167,6 +176,7 @@ def main():
                 suffix=args.suffix,
                 aligner_name=args.aligner_name,
                 aligner_cmd=args.aligner_cmd,
+                index_cmd=args.index_cmd,
                 streamed=args.streamed,
                 mapq=args.mapq,
                 low_mapq=args.low_mapq,
@@ -196,6 +206,7 @@ def main():
                 suffix=args.suffix,
                 aligner_name=args.aligner_name,
                 aligner_cmd=args.aligner_cmd,
+                index_cmd=args.index_cmd,
                 streamed=args.streamed,
                 mapq=args.mapq,
                 low_mapq=args.low_mapq,
@@ -221,6 +232,7 @@ def main():
                 verbose=args.verbose,
                 aligner_name=args.aligner_name,
                 aligner_cmd=args.aligner_cmd,
+                index_cmd=args.index_cmd,
                 run_id=args.run_id,
                 streamed=args.streamed,
                 mapq=args.mapq,

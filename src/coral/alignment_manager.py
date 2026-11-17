@@ -15,6 +15,31 @@ LOW_MAPQ_THRESHOLD = 1
 DEFAULT_MAPQ_THRESHOLD = 60
 DEFAULT_OFFSET = 75
 
+# Built-in aligners: the command that indexes the reference (run once) and the alignment command.
+# Placeholders: {ref} the reference FASTA, {refdir} its folder, {fq} the pseudo-reads, {cores} threads.
+# minimap2's preset (-x sr) sets the index's k-mer and window sizes, so it is given in both commands.
+ALIGNERS = {
+    "bwa": {"index": "bwa index {ref}",
+            "align": "bwa mem -t {cores} {ref} {fq}"},
+    "bwa-mem2": {"index": "bwa-mem2 index {ref}",
+                 "align": "bwa-mem2 mem -t {cores} {ref} {fq}"},
+    "minimap2": {"index": "minimap2 -x sr -d {ref}.mmi {ref}",
+                 "align": "minimap2 -t {cores} -ax sr {ref}.mmi {fq}"},
+    "bbmap": {"index": "bbmap.sh ref={ref} path={refdir}",
+              "align": "bbmap.sh path={refdir} threads={cores} in={fq} out=stdout.sam ordered=t"},
+}
+
+
+def aligner_commands(aligner_name="bwa", aligner_cmd=None, index_cmd=None):
+    """(index command or None, alignment command): a built-in aligner, or a custom alignment command with its own
+    optional index command. index_cmd also replaces a built-in aligner's index command."""
+    if aligner_cmd:
+        return index_cmd, aligner_cmd
+    name = aligner_name or "bwa"
+    if name not in ALIGNERS:
+        raise ValueError(f"Unsupported aligner: {name} (built-in: {', '.join(ALIGNERS)}; or use --aligner-cmd)")
+    return index_cmd or ALIGNERS[name]["index"], ALIGNERS[name]["align"]
+
 
 def has_bam_index(bam_path):
     """True if the BAM has a .csi or .bai index.
@@ -354,7 +379,8 @@ class Aligner:
         no_cache=False,
         cores = None,
         verbose=True,
-        annotate=False
+        annotate=False,
+        index_cmd=None
     ):
         self.species = species_genome.name
         self.reference = reference_genome.name
@@ -364,6 +390,7 @@ class Aligner:
         self.cores = cores if cores else multiprocessing.cpu_count()
 
         self.species_fasta = species_genome.fasta_path
+        self.reference_genome = reference_genome
         self.reference_fasta = reference_genome.fasta_path
         self.fastq = species_genome.fastq_path
         self.bam_dir = f"{self.output_dir}/BAMs"
@@ -380,44 +407,27 @@ class Aligner:
         os.makedirs(self.bam_dir, exist_ok=True)
         os.makedirs(self.plots_dir, exist_ok=True)
 
-        if aligner_cmd:
-            self.aligner_cmd_template = aligner_cmd
-        elif aligner_name:
-            self.aligner_cmd_template = self.get_aligner_cmd_from_name(aligner_name)
-        else:
-            log("No aligner specified. Defaulting to 'bwa'", self.verbose)
-            self.aligner_cmd_template = self.get_aligner_cmd_from_name("bwa")
-
+        self.index_cmd, self.aligner_cmd_template = aligner_commands(aligner_name, aligner_cmd, index_cmd)
         self.validate_aligner_cmd()
 
-    def get_aligner_cmd_from_name(self, name):
-        commands = {
-            "bwa": "bwa mem -t {cores} {ref} {fq}",
-            "bwa-mem2": "bwa-mem2 mem -t {cores} {ref} {fq}",
-            "minimap2": "minimap2 -t {cores} -ax sr {ref} {fq}",
-            "bbmap": "bbmap.sh ref={ref} threads={cores} in={fq} out=stdout.sam ordered=t path={tmp}"
-
-        }
-        if name not in commands:
-            raise ValueError(f"Unsupported aligner: {name}")
-        return commands[name]
-
     def validate_aligner_cmd(self):
-        required = ["{ref}", "{fq}", "{cores}"]
-        for r in required:
-            if r not in self.aligner_cmd_template:
-                raise ValueError(f"--aligner-cmd must include placeholders: {', '.join(required)}")
+        cmd = self.aligner_cmd_template
+        if "{fq}" not in cmd or "{cores}" not in cmd or not ("{ref}" in cmd or "{refdir}" in cmd):
+            raise ValueError("--aligner-cmd must include {fq}, {cores}, and {ref} or {refdir}")
+
+    def _align_command(self):
+        """The alignment command, after making sure the reference is indexed (a no-op once it is)."""
+        self.reference_genome.index(self.index_cmd, self.cores)
+        ref = self.reference_fasta
+        return (self.aligner_cmd_template.replace("{refdir}", os.path.dirname(os.path.abspath(ref)))
+                .replace("{ref}", ref).replace("{fq}", self.fastq).replace("{cores}", str(self.cores)))
 
     def align_streamed(self, mapq=60, low_mapq = 1, max_sort_mem=None, continuity = True, continuity_run=2):
         if os.path.exists(self.final_bam) and has_bam_index(self.final_bam) and not self.no_cache:
             log(f"Streamed alignment already exists: {self.final_bam}", self.verbose)
             return self.final_bam
 
-        cmd = self.aligner_cmd_template \
-        .replace("{ref}", self.reference_fasta) \
-        .replace("{fq}", self.fastq) \
-        .replace("{cores}", str(self.cores)) \
-        .replace("{tmp}", os.path.dirname(self.reference_fasta))
+        cmd = self._align_command()
 
         log("Running full streaming alignment + filtering + sorting...", self.verbose)
 
@@ -470,11 +480,7 @@ class Aligner:
     def align_disk_cached(self, mapq=60, low_mapq=1, continuity = True, continuity_run=2):
         # Step 1: align to an unsorted raw BAM (query order, as the filters need)
         if not os.path.exists(self.raw_bam) or self.no_cache:
-            cmd = self.aligner_cmd_template \
-            .replace("{ref}", self.reference_fasta) \
-            .replace("{fq}", self.fastq) \
-            .replace("{cores}", str(self.cores)) \
-            .replace("{tmp}", os.path.dirname(self.reference_fasta))
+            cmd = self._align_command()
             log("Running alignment to raw BAM...", self.verbose)
 
             tmp_raw_bam = self.raw_bam + ".tmp"
