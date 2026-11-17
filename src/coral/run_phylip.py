@@ -1,9 +1,8 @@
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import pandas as pd
-from .multiple_species_utils import annotate_tree_with_indices, load_random_rows
+from .multiple_species_utils import load_random_rows
 from .utils import log
 
 
@@ -82,6 +81,7 @@ def run_phylip_command(df, output_dir, exe_path, tree=None, prefix="run1", phyli
         f.write(result.stderr)
 
     if result.returncode != 0:
+        os.chdir(cwd)
         raise RuntimeError(
             f"PHYLIP run failed.\nExit code: {result.returncode}\n"
             f"stdout:\n{result.stdout}\n"
@@ -178,36 +178,3 @@ def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, ma
             log(f"The input tree requires {ratio:.2f} times more changes than the most parsimonious tree.", verbose)
         else:
             log(f"Unexpected: input tree is more parsimonious than the optimal tree (check logic).", verbose)
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Run PHYLIP on mutation matrix.")
-    parser.add_argument("--command", type=str, required=True,
-                        help="PHYLIP command to run: 'dnapars', 'dnapenny', or 'dnamlk'")
-    parser.add_argument("--input", type=str, default="../Output/test_run_mutiple_species/matching_bases.csv.gz",
-                        help="Path to input CSV mutation matrix")
-    parser.add_argument("--tree-input", type=str, default=None,
-                        help="Path to input newick tree file")
-    parser.add_argument("--output-dir", type=str, default="../Output/test_run_mutiple_species/phylip_run",
-                        help="Directory to write PHYLIP outputs")
-    parser.add_argument("--prefix", type=str, default="species_run",
-                        help="Prefix for output files")
-    parser.add_argument("--interactive", type=str, default="Y\n",
-                        help="Interactive input for PHYLIP (default: just accept settings)")
-    parser.add_argument("--outgroup", type=str, default=None,
-                        help="Outgroup species name for tree annotation")
-    args = parser.parse_args()
-    _, mapping = annotate_tree_with_indices(args.tree_input, args.outgroup)
-
-    run_phylip(
-        command=args.command,
-        df_path=args.input,
-        tree_path=args.tree_input,
-        output_dir=args.output_dir,
-        prefix=args.prefix,
-        input_string=args.interactive,
-        mapping=mapping
-    )
-

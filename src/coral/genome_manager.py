@@ -106,7 +106,7 @@ class Genome:
         # mis-map to paralogs). Read names carry the 1-based inclusive span.
         self.n_contigs = self.total_bp = 0
         written = skipped = 0
-        with open(output_fastq, 'w') as out:
+        with open(output_fastq + ".tmp", 'w') as out:
             for record in SeqIO.parse(self.fasta_path, "fasta"):
                 chrom_name = record.id
                 sequence = str(record.seq)
@@ -129,6 +129,7 @@ class Genome:
                     out.write(f"{'I' * len(frag)}\n")
                     written += 1
 
+        os.replace(output_fastq + ".tmp", output_fastq)
         self.fragments_written, self.fragments_skipped_repeat = written, skipped
         self.masked_bp = repeat_mask.n_masked_bases if repeat_mask else None
         if repeat_mask:
