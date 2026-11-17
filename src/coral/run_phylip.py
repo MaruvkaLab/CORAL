@@ -106,7 +106,8 @@ def run_phylip_command(df, output_dir, exe_path, tree=None, prefix="run1", phyli
 
 
 
-def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, mapping, verbose=True, no_cache=False):
+def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, mapping, verbose=True, no_cache=False,
+               skip_no_tree=False):
     from ete3 import Tree
     df = load_random_rows(df_path, verbose=verbose).astype(str)
     tree = Tree(tree_path, format=1) if tree_path else None
@@ -129,6 +130,10 @@ def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, ma
     if not no_cache and all(os.path.exists(p) for p in cached.values()):
         log(f"PHYLIP outputs without a starting tree already exist in {no_tree_dir}. Skipping.", verbose)
         default_output = {k: os.path.abspath(p) for k, p in cached.items()}
+    elif skip_no_tree and tree_path:
+        # The spectra use the given tree; the best tree found here is only compared with it below
+        log(f"Skipping PHYLIP {command} without a starting tree (--skip-no-tree).", verbose)
+        default_output = None
     else:
         log(f"Running PHYLIP {command} without a starting tree...", verbose)
         default_output = run_phylip_command(
@@ -154,6 +159,8 @@ def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, ma
             verbose=verbose
         )
         log(f"PHYLIP outputs (with tree): {tree_output}", verbose)
+        if default_output is None:
+            return
 
         
         # Compare the given tree with the most parsimonious tree

@@ -822,5 +822,6 @@ class MultiSpeciesMutationPipeline:
             input_string="5\nY\n",
             mapping=self.terminal_mapping,
             verbose=self.verbose,
-            no_cache=self.no_cache
+            no_cache=self.no_cache,
+            skip_no_tree=self.params.get("skip_no_tree", False)
         )

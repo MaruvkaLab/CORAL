@@ -134,6 +134,8 @@ def main():
     multi.add_argument("--cores", type=int, default=None,
                        help="Number of cores to use. Default: use all available cores. "
                        "--cores 1 runs everything serially.")
+    multi.add_argument("--skip-no-tree", action="store_true",
+                       help="With --newick-tree: don't search for the most parsimonious tree in PHYLIP.")
 
     # Parallelism (run_multi is parallel by default; these switch it off)
     multi.add_argument("--no-parallel", action="store_true",
@@ -224,6 +226,8 @@ def main():
             pipeline.run()
 
         elif args.subcmd == "run_multi":
+            if args.skip_no_tree and not args.newick_tree:
+                parser.error("--skip-no-tree needs --newick-tree")
             pipeline = MultiSpeciesMutationPipeline(
                 newick_tree=args.newick_tree,
                 species_list=args.species_list,
@@ -247,6 +251,7 @@ def main():
                 fitch_jobs=args.fitch_jobs,
                 max_memory_mb=args.max_memory_mb,
                 indel_window=args.indel_window,
+                skip_no_tree=args.skip_no_tree,
             )
             pipeline.run()
 
