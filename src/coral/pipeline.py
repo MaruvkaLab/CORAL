@@ -819,7 +819,7 @@ class MultiSpeciesMutationPipeline:
             tree_path=os.path.join(self.output_dir, "annotated_tree.nwk") if self.newick_tree else None,
             output_dir=self.output_dir,
             prefix="multi_species_phylip",
-            input_string="5\nY\n",
+            input_string="Y\n", 
             mapping=self.terminal_mapping,
             verbose=self.verbose,
             no_cache=self.no_cache,
