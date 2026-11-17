@@ -9,7 +9,6 @@ dependencies:
   - ncbi-datasets-cli
   - numpy
   - pandas
-  - click
   - biopython
   - pysam
   - ete3
@@ -19,12 +18,5 @@ dependencies:
   - pip
   - setuptools
   - wheel
-  # Optional: PHYLIP (required for multi-species pipeline and run_phylip command)
-  # Uncomment the following line if you need PHYLIP functionality:
-  # - phylip
 
-  # Optional: repeat masking (--repeat-mask, off by default).
-  # blast provides windowmasker (the default backend); repeatmasker is only
-  # needed for --repeat-mask repeatmasker.
-  # - blast
-  # - repeatmasker
+# Optional tools and installation commands are listed in README.md.

@@ -4,108 +4,52 @@ This document describes the output file structure and naming conventions used by
 
 ## Output Directory Structure
 
-CORAL creates a self-contained output directory for each run. The directory structure follows this pattern:
-
 ```
 <output_dir>/
   └── <run_id>/
-      ├── *.fasta                    # Genome FASTA files
-      ├── *.pileup.gz               # Multi-taxa pileup file
-      ├── *_mutations.csv.gz        # Full mutation lists (one per species pair)
-      ├── *_mutations.json          # Mutation context counts (one per species pair)
-      ├── Mutations/                 # Mutation files directory
+      ├── Mutations/                 # Mutation lists (CSV) and counts (JSON)
       ├── Triplets/                  # Trinucleotide context files
       ├── Tables/                    # Normalized spectra tables
       ├── Plots/                     # Visualization plots
       ├── Intervals/                 # Read interval files (for coverage plots)
-      ├── run_summary.json           # Extraction diagnostics (one per run/trio)
+      ├── run_summary.json           # Extraction diagnostics
       └── pipeline_timings.json      # Pipeline execution timing information
 ```
 
-## Run ID Naming Convention
+The genome folders (FASTA and aligner index), `BAMs/` and any pileup are removed at the end of a run; `--no-cleanup`
+keeps them. Optional outputs: `Annotated/` (`--annotate`), `Five_mers/` (`--five-mer`) and `near_indel.json`
+(windows left out near indels, with `--indel-window` K > 1). If files already exist and `--no-cache` is not
+specified, CORAL skips regeneration and uses the existing files.
 
-The `run_id` determines the output directory name and is used in many file names.
+## Run ID
 
-### For `coral run_trio`:
+The `run_id` names the output directory:
 
-**Default run_id:**
+- `coral run_trio`: `<outgroup_name>__<species1_name>__<species2_name>`, plus `_<suffix>` with `--suffix`
+- `coral run_pair`: `<reference_name>__<target_name>`
+- `coral run_multi`: `multi_species_run`, or the value of `--run-id`
+
+Species names use underscores (`_`) instead of spaces; double underscores (`__`) separate species names.
+
+## Mutation Files
+
+**Each file contains the mutations inferred to have occurred on the phylogenetic branch leading to the first listed
+taxon (`<taxon1>`) since its divergence from `<taxon2>`, using `<reference>` as the reference genome.**
+
 ```
-<outgroup_name>__<species1_name>__<species2_name>
-```
-
-**Example:**
-- Outgroup: `Saccharomyces_mikatae_IFO_1815`
-- Species 1: `Saccharomyces_paradoxus`
-- Species 2: `Saccharomyces_cerevisiae_S288C`
-- **Run ID:** `Saccharomyces_mikatae_IFO_1815__Saccharomyces_paradoxus__Saccharomyces_cerevisiae_S288C`
-
-**With `--suffix`:**
-If you specify `--suffix test`, the run_id becomes:
-```
-<outgroup_name>__<species1_name>__<species2_name>_test
-```
-
-### For `coral run_pair`:
-
-**Default run_id:**
-```
-<reference_name>__<target_name>
+Mutations/<taxon1>__<taxon2>__<reference>__mutations.csv.gz
+Mutations/<taxon1>__<taxon2>__<reference>__mutations.json
 ```
 
-### For `coral run_multi`:
+A trio writes one pair of files per branch. For example,
+`Saccharomyces_paradoxus__Saccharomyces_cerevisiae_S288C__Saccharomyces_mikatae_IFO_1815__mutations.csv.gz` contains
+the mutations on the branch leading to `Saccharomyces_paradoxus` after its split from `Saccharomyces_cerevisiae_S288C`,
+with `Saccharomyces_mikatae_IFO_1815` as the outgroup.
 
-**Default run_id:**
-```
-multi_species_run
-```
+The CSV has one row per mutation: `chromosome`, `position` (1-based, on the reference) and `mutation` (e.g.
+`A[C>T]G`). The JSON counts the mutations by trinucleotide substitution type, before strand collapse.
 
-**Custom run_id:**
-If you specify `--run-id <custom_id>`, that value is used directly.
-
-## File Naming Conventions
-
-### Pileup Files
-
-**Pattern:**
-```
-<run_id>.pileup.gz
-```
-
-**Example:**
-```
-Saccharomyces_mikatae_IFO_1815__Saccharomyces_paradoxus__Saccharomyces_cerevisiae_S288C.pileup.gz
-```
-
-### Mutation Files
-
-Mutation files are named based on a species pair and a reference genome. **Each file contains the mutations inferred to have occurred on the phylogenetic branch leading to the first listed taxon (`<taxon1>`) since its divergence from `<taxon2>`, using `<reference>` as the reference genome.** In other words, for the file `<taxon1>__<taxon2>__<reference>__mutations.csv.gz`, the mutations listed are those on the branch leading to `<taxon1>`, relative to the common ancestor with `<taxon2>`.
-
-**Pattern:**
-```
-<taxon1>__<taxon2>__<reference>__mutations.csv.gz
-<taxon1>__<taxon2>__<reference>__mutations.json
-```
-
-**Example:**
-For a run with:
-- Reference: `Saccharomyces_mikatae_IFO_1815`
-- Taxon 1: `Saccharomyces_paradoxus`
-- Taxon 2: `Saccharomyces_cerevisiae_S288C`
-
-Two mutation files are created for each direction (i.e., branch), corresponding to the mutations on the branch leading to each taxon:
-```
-Saccharomyces_paradoxus__Saccharomyces_cerevisiae_S288C__Saccharomyces_mikatae_IFO_1815__mutations.csv.gz      # Mutations on the S. paradoxus branch
-Saccharomyces_paradoxus__Saccharomyces_cerevisiae_S288C__Saccharomyces_mikatae_IFO_1815__mutations.json
-Saccharomyces_cerevisiae_S288C__Saccharomyces_paradoxus__Saccharomyces_mikatae_IFO_1815__mutations.csv.gz      # Mutations on the S. cerevisiae branch
-Saccharomyces_cerevisiae_S288C__Saccharomyces_paradoxus__Saccharomyces_mikatae_IFO_1815__mutations.json
-```
-*For example, `Saccharomyces_paradoxus__Saccharomyces_cerevisiae_S288C__Saccharomyces_mikatae_IFO_1815__mutations.csv.gz` contains all mutations inferred to have occurred on the branch leading to `Saccharomyces_paradoxus` after its split from `Saccharomyces_cerevisiae_S288C`, using `Saccharomyces_mikatae_IFO_1815` as the outgroup/reference.*
-
-**Location:**
-- CSV files: `<run_id>/Mutations/`
-- JSON files: `<run_id>/Mutations/`
-
-#### Pair mode
+### Pair mode
 
 `coral run_pair` writes one pair of files, for the target against the reference:
 ```
@@ -119,113 +63,50 @@ The CSV has a row per call: `chromosome,position,change,mutation`, for example
 undirected classes. The JSON counts those 52 classes. Because there is no outgroup, neither
 column says which lineage changed.
 
-### Triplet Files
+## Triplet Files
 
-**Pattern:**
-```
-<taxon1>__<taxon2>__<reference>__triplets.json
-```
-
-**Location:**
-`<run_id>/Triplets/`
+`Triplets/<taxon1>__<taxon2>__<reference>__triplets.json` counts the outgroup trinucleotides at the branch's callable
+sites (identical in all three species or mutated in one sister), the denominator of the normalization.
 
 Pair mode writes `<target>__<reference>__triplets.json`: every window that was called or
 identical, i.e. the windows a call could have been made in, counted half to the reference 3-mer
 and half to the target 3-mer (identical windows count 1, a called window 0.5 to each allele).
 
-### Normalized Spectra Tables
+## Tables
 
-**Pattern:**
-The following files are created in the `Tables/` directory:
+Trio mode writes, with one column per mutation file:
 
 - `normalized_scaled.tsv` - Normalized mutation spectra (scaled)
 - `collapsed_mutations.tsv` - Raw mutation counts (collapsed)
 - `scaled_raw.tsv` - Scaled raw mutation counts
 - `triplets.tsv` - Trinucleotide context counts
 
-**Location:**
-`<run_id>/Tables/`
+Rows are the 96 mutation types `X[Y>Z]W` (`X` and `W` the flanking bases, `Y` the reference base, `Z` the derived
+base; `A[T>C]A` is `ATA` to `ACA`), or the 32 trinucleotide contexts in `triplets.tsv`. For example:
 
-**Table Format:**
-
-#### `triplets.tsv`
-
-This file contains trinucleotide context counts for each mutation file. Each row represents a trinucleotide context (e.g., `ATG`, `ATT`, `ATA`), and columns represent different mutation files.
-
-**Format:**
-- First column: Trinucleotide context (e.g., `ATG`, `ATT`, `ATA`)
-- Subsequent columns: Counts for each mutation file, with column headers matching the mutation file names (without extensions)
-
-**Example:**
 ```
-Saccharomyces_cerevisiae_S288C__Saccharomyces_paradoxus__Saccharomyces_mikatae_IFO_1815__mutations	Saccharomyces_paradoxus__Saccharomyces_cerevisiae_S288C__Saccharomyces_mikatae_IFO_1815__mutations
-ATG	120647	120647
-ATT	165537	165537
-ATA	128936	128936
-TTC	138995	138995
-CCT	56896	56896
-TTT	213608	213608
-```
-
-#### `normalized_scaled.tsv`
-
-This file contains normalized mutation spectra with mutation types in the format `X[Y>Z]W`, where:
-- `X` and `W` are the 5' and 3' flanking bases (trinucleotide context)
-- `Y` is the reference base
-- `Z` is the derived base
-
-Each row represents a mutation type, and columns represent counts for each mutation file.
-
-**Format:**
-- First column: Mutation type in format `X[Y>Z]W` (e.g., `A[T>C]A`, `T[T>C]T`)
-- Subsequent columns: Normalized counts for each mutation file, with column headers matching the mutation file names (without extensions)
-
-**Example:**
-```
-Saccharomyces_cerevisiae_S288C__Saccharomyces_paradoxus__Saccharomyces_mikatae_IFO_1815__mutations	Saccharomyces_paradoxus__Saccharomyces_cerevisiae_S288C__Saccharomyces_mikatae_IFO_1815__mutations
+	Saccharomyces_cerevisiae_S288C__..._mutations	Saccharomyces_paradoxus__..._mutations
 A[T>C]A	4812	3749
 T[T>C]T	6118	5466
 T[T>A]C	352	236
-T[C>T]T	5322	3368
-C[C>T]T	3558	2414
-C[T>C]G	3635	3480
 ```
 
-**Note:** The mutation type format `X[Y>Z]W` represents a substitution from `Y` to `Z` in the context of flanking bases `X` and `W`. For example, `A[T>C]A` means a T→C substitution in the context of A on both sides (i.e., the trinucleotide context is `ATA` → `ACA`).
+Pair mode writes `Tables/<target>__<reference>__normalized.tsv`, with the columns `label`, `count`,
+`opportunity`, `rate` (count / opportunity) and `normalized` (rates scaled to sum to 10,000). A class's opportunity
+counts both of its trinucleotides, on either strand.
 
-### Interval Files
+## Intervals and Plots
 
-**Pattern:**
-```
-<base_bam_name>_intervals.tsv.gz
-```
+`Intervals/<species>_to_<reference>_intervals.tsv.gz` lists the reference intervals covered by aligned reads
+(`chromosome`, `start`, `end`; 0-based, end-exclusive), used for the coverage plots.
 
-Where `<base_bam_name>` is derived from the BAM file name (without `.bam` extension).
+`Plots/` holds the mutation spectra (`*_normalized.png`, `*_raw.png`, `*_triplets.png`), coverage
+(`coverage_<chromosome>.png`) and mutation density (`mutation_density_<chromosome>.png`) plots. The MAPQ histograms
+are written to `<output_dir>/Plots/<species>_to_<reference>.png`.
 
-**Example:**
-```
-Saccharomyces_paradoxus_to_Saccharomyces_mikatae_IFO_1815_intervals.tsv.gz
-```
+## Multi-Species Pipeline Files
 
-**Location:**
-`<run_id>/Intervals/`
-
-### Plot Files
-
-**Pattern:**
-Plots are generated with descriptive names:
-
-- Mutation spectra: `*_normalized.png`, `*_raw.png`, `*_triplets.png`
-- Coverage plots: `coverage_<chromosome>.png`
-- Mutation density: `mutation_density_<chromosome>.png`
-- MAPQ histograms: `<species>_to_<reference>_MAPQ.png`
-
-**Location:**
-`<run_id>/Plots/`
-
-### Multi-Species Pipeline Files
-
-For `coral run_multi`, additional files are created:
+For `coral run_multi`, additional files are created in `<run_id>/`:
 
 - `matching_bases.csv.gz` - Mutation matrix for phylogenetic analysis
 - `annotated_tree.nwk` - Newick tree with branch annotations
@@ -234,49 +115,15 @@ For `coral run_multi`, additional files are created:
   normalization denominator
 - `mutation_spectras.tsv` - Mutation spectra summary
 
-**Location:**
-`<run_id>/`
-
 `run_multi` also writes `Mutations/` and `Tables/` in the formats described
 above, one column per tree branch instead of one per species pair. Branch names
 come from PHYLIP's interior numbering, so they match the `.outfile` of the
 corresponding run in `multi_species_phylip_no_tree/` or
 `multi_species_phylip_with_tree/`.
 
-## File Formats
+## Run summary (`run_summary.json`)
 
-### Pileup Files (`.pileup.gz`)
-- Format: Gzipped text file
-- Content: Multi-taxa pileup format from samtools mpileup
-- Contains: Reference and aligned species base calls at each position
-
-### Mutation CSV Files (`.csv.gz`)
-- Format: Gzipped CSV
-- Columns: `chromosome`, `position`, `reference_base`, `taxon1_base`, `taxon2_base`, `context`, etc.
-- Contains: Full list of detected mutations with genomic positions
-
-### Mutation JSON Files (`.json`)
-- Format: JSON
-- Content: Mutation context counts (trinucleotide substitution counts)
-- Structure: Dictionary mapping mutation types to counts
-
-### TSV Tables (`.tsv`)
-- Format: Tab-separated values
-- Content: Normalized mutation spectra, collapsed counts, or triplet frequencies
-- Structure: 
-  - First column: Row identifier (trinucleotide context or mutation type)
-  - Subsequent columns: Counts for each mutation file (column headers match mutation file names)
-- Mutation type format: `X[Y>Z]W` where `X` and `W` are flanking bases, `Y` is reference base, `Z` is derived base
-- See [Normalized Spectra Tables](#normalized-spectra-tables) section above for detailed format examples
-
-### Interval Files (`.tsv.gz`)
-- Format: Gzipped TSV
-- Columns: `chromosome`, `start`, `end`
-- Content: Genomic intervals covered by aligned reads
-
-### Run Summary (`run_summary.json`)
-
-One file per run directory, i.e. per trio, written by the mutation extractor. It records
+One file per run, written by the mutation extractor. It records
 what the scan saw, including the sites that produce no mutation call and therefore appear
 in no other output. Counts are omitted when zero, so read them with a default of 0.
 
@@ -292,7 +139,7 @@ in no other output. Counts are omitted when zero, so read them with a default of
 }
 ```
 
-**`pileup_lines`** counts individual pileup lines. `lines_after_mask` is the number of lines
+**`pileup_lines`** counts covered reference positions (one pileup line each). `lines_after_mask` is the number of lines
 the scan actually saw, i.e. after repeat masking removed any; `lines_masked` is how many
 masking removed. The remaining keys are per-line QC rejections: `no_depth`, `deletion`,
 `insertion`, `reads_disagree`, `unparsed`. A line is attributed to the *first* check it
@@ -331,29 +178,16 @@ sisters carry one base and the reference carries another, but three taxa cannot 
 that: a single change on the reference branch and a single change on the branch ancestral
 to both sisters are equally parsimonious. Resolving it needs a fourth taxon.
 
+**`reference_difference_spectrum`** is the trinucleotide spectrum of those same sites,
+written as `sister_base > reference_base`. Because the change is unpolarized, this
+direction is a convention, not an inference - where the change actually occurred on the
+sister-ancestor branch, the true substitution is the reverse. Treat it as a divergence
+spectrum between the sister pair's ancestor and the reference, not as a branch-specific
+mutation spectrum, and do not feed it to signature extraction as if it were one.
+
 The pipeline adds four more sections after extraction: **`run`** (run id, taxa, parameters,
 tool versions), **`genomes`** (accession, contig count and total bp), **`alignment`**
 (per species: read counts split into `kept_high_mapq` versus `kept_rescued` by the
 continuity rule, the filtered categories, and the full MAPQ histogram), and **`timings`**
 (per-stage wall and CPU seconds, per-species alignment time).
 `alignment` is absent when the BAMs were reused from a previous run rather than re-filtered.
-
-**`reference_difference_spectrum`** is the trinucleotide spectrum of those same sites,
-written as `sister_base > reference_base`. Because the change is unpolarized, this
-direction is a convention, not an inference — where the change actually occurred on the
-sister-ancestor branch, the true substitution is the reverse. Treat it as a divergence
-spectrum between the sister pair's ancestor and the reference, not as a branch-specific
-mutation spectrum, and do not feed it to signature extraction as if it were one.
-
-## Notes
-
-1. **Species name format**: Species names use underscores (`_`) instead of spaces, matching NCBI naming conventions.
-
-2. **Separator**: Double underscores (`__`) are used to separate species names in file names to avoid ambiguity.
-
-3. **Compression**: Large files (pileups, mutation CSVs, intervals) are gzipped to save space.
-
-4. **Directory organization**: Files are organized into subdirectories (`Mutations/`, `Tables/`, `Plots/`, etc.) for clarity.
-
-5. **Caching**: If files already exist and `--no-cache` is not specified, CORAL will skip regeneration and use existing files.
-

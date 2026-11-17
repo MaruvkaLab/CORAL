@@ -5,19 +5,24 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "coral"
 version = "0.1.0"
-description = "Multi-Species Mutation Extraction Pipeline"
+description = "Read-based extraction of pairwise and lineage-specific substitution spectra"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "pandas",
     "numpy",
-    "click",
     "biopython",
     "pysam",
     "matplotlib",
     "ete3",
     "psutil",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.urls]
+Repository = "https://github.com/MaruvkaLab/CORAL"
 
 [project.scripts]
 coral = "coral.cli:main"

@@ -33,3 +33,9 @@ Output/
 test_output/
 # Generated test outputs
 /test_output/
+
+# Build and test artifacts
+.pytest_cache/
+.ipynb_checkpoints/
+build/
+dist/
