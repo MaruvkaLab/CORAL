@@ -3,6 +3,20 @@ import os
 import subprocess
 from .utils import log, run_cmd
 
+#: Options shared by the whole-genome pileup and the per-chromosome scan. That
+#: identity is what makes a chromosome's pileup a slice of the whole-genome one,
+#: so they must be built from here rather than spelled out twice.
+MPILEUP_OPTS = ["-B", "-d", "100"]
+
+
+def mpileup_cmd(ref_fasta, bams, region=None):
+    """Build the mpileup argv. ``region`` adds ``-r``; everything else is fixed."""
+    cmd = ["samtools", "mpileup", "-f", ref_fasta] + MPILEUP_OPTS
+    if region is not None:
+        cmd += ["-r", region]
+    return cmd + list(bams)
+
+
 class Pileup:
     def __init__(self, outgroup, aligners, base_output_dir, run_id = None, no_cache=False, verbose=True):
         self.reference = outgroup.name
@@ -32,8 +46,7 @@ class Pileup:
             return self.pileup_path
 
         log(f"Generating pileup: {self.pileup_path}", self.verbose)
-        cmd = ["samtools", "mpileup", "-f", self.ref_fasta, "-B", "-d", "100"] + \
-            [bam.final_bam for bam in self.bams]
+        cmd = mpileup_cmd(self.ref_fasta, [bam.final_bam for bam in self.bams])
 
         # Use a temporary file for atomic write
         tmp_path = self.pileup_path + ".tmp"

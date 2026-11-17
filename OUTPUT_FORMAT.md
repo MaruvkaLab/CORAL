@@ -205,10 +205,18 @@ For `coral run_multi`, additional files are created:
 - `matching_bases.csv.gz` - Mutation matrix for phylogenetic analysis
 - `annotated_tree.nwk` - Newick tree with branch annotations
 - `species_mapping.json` - Mapping between species names and internal IDs
+- `triplets.json` - Trinucleotide context counts from the scan, used as the
+  normalization denominator
 - `mutation_spectras.tsv` - Mutation spectra summary
 
 **Location:**
 `<run_id>/`
+
+`run_multi` also writes `Mutations/` and `Tables/` in the formats described
+above, one column per tree branch instead of one per species pair. Branch names
+come from PHYLIP's interior numbering, so they match the `.outfile` of the
+corresponding run in `multi_species_phylip_no_tree/` or
+`multi_species_phylip_with_tree/`.
 
 ## File Formats
 

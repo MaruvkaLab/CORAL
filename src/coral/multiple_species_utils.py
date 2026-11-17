@@ -120,23 +120,6 @@ def save_annotated_tree(tree, path):
     for node in tree.traverse():
         node.name = original_names[node]
 
-complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C'}
-
-def get_complement(mutation):
-    comp = [complement[nuc] if nuc in complement else nuc for nuc in mutation]
-    comp[0], comp[-1] = comp[-1], comp[0]
-    return ''.join(comp)
-
-def collapse_mutations(mutation_dict):
-    collapsed = defaultdict(int)
-    for mutation, count in mutation_dict.items():
-        if mutation[2] in {'A', 'G'}:
-            collapsed[get_complement(mutation)] += int(count)
-        else:
-            collapsed[mutation] += int(count)
-    return collapsed
-
-
 def load_random_rows(file_path, max_rows=1000000, seed=42, verbose=True):
     random.seed(seed)
     
@@ -159,8 +142,97 @@ def load_random_rows(file_path, max_rows=1000000, seed=42, verbose=True):
 
     return pd.read_csv(StringIO(header + ''.join(sampled_lines)), index_col=0).astype(str)
 
-mutation_pattern = re.compile(r"^[ACGT]\[[ACGT]>[ACGT]\][ACGT]$")
 
-def filter_mutations_dict(d):
-    return {k: v for k, v in d.items() if mutation_pattern.match(k)}
 
+def parse_phylip_edges(outfile_path):
+    """Edges from the 'between / and / length' table of a dnapars outfile."""
+    text = open(outfile_path).read()
+    m = re.search(r"between\s+and\s+length\s*\n(.*?)\n\s*\n", text, re.S)
+    if m is None:
+        raise ValueError(f"No 'between/and/length' table in {outfile_path} "
+                         f"(did you pass the .outtree instead of the .outfile?)")
+    edges = []
+    for line in m.group(1).strip().splitlines():
+        p = line.split()
+        # keep only real endpoints: an integer (interior) or 'taxaN' (tip)
+        if len(p) >= 2 and re.fullmatch(r"\d+|taxa\d+", p[0]) and re.fullmatch(r"\d+|taxa\d+", p[1]):
+            edges.append((p[0], p[1]))
+    return edges
+
+
+def phylip_interior_clades(edges, outgroup_label):
+    """{interior_number: frozenset(descendant tip labels)} when rooted on the outgroup tip."""
+    adj = defaultdict(list)
+    for a, b in edges:
+        adj[a].append(b); adj[b].append(a)
+    clades = {}
+    def dfs(node, parent):
+        s = {node} if node.startswith("taxa") else set()
+        for nb in adj[node]:
+            if nb != parent:
+                s |= dfs(nb, node)
+        clades[node] = frozenset(s)
+        return s
+    dfs(outgroup_label, None)
+    return {n: c for n, c in clades.items() if not n.startswith("taxa")}
+
+
+def read_phylip_outtree_newick(outtree_path, verbose=True):
+    r"""The first newick string in a PHYLIP .outtree. """
+    text = open(outtree_path).read()
+
+    start = text.find("(")
+    if start == -1:
+        raise ValueError(f"No newick tree found in {outtree_path}")
+    end = text.find(";", start)
+    if end == -1:
+        raise ValueError(f"Unterminated newick tree in {outtree_path} "
+                         f"(no ';' after the opening '(')")
+
+    if text[end + 1:].strip():
+        log(f"{outtree_path} holds more than one tree; using the first.", verbose)
+
+    return "".join(text[start:end + 1].split())
+
+
+def tree_from_phylip_outtree(outtree_path, terminal_mapping, outgroup_name):
+    """PHYLIP's tree (leaves 'taxa0'..'taxaN', unrooted) annotated for Fitch.
+
+    Indices come from `terminal_mapping`, so leaves stay
+    aligned with the taxaK columns in matching_bases.csv.gz.
+    """
+    from ete3 import Tree
+
+    newick = read_phylip_outtree_newick(outtree_path)
+    try:
+        tree = Tree(newick, format=1)
+    except Exception as exc:
+        raise ValueError(
+            f"Could not parse the PHYLIP tree in {outtree_path}: {exc}\n"
+            f"newick read: {newick[:200]}"
+        ) from exc
+
+    for leaf in tree.iter_leaves():                    # taxaN -> species name
+        idx = int(leaf.name.replace("taxa", ""))
+        leaf.name = terminal_mapping[idx]
+
+    tree.set_outgroup(tree & outgroup_name)            # unrooted -> polarity for Fitch
+
+    for leaf in tree.iter_leaves():
+        leaf.add_feature("index", terminal_mapping[leaf.name])
+        leaf.add_feature("custom_name", leaf.name)
+
+    outfile_path = outtree_path.replace(".outtree", ".outfile")   # the table lives in .outfile
+    edges = parse_phylip_edges(outfile_path)
+    clades = phylip_interior_clades(edges, f"taxa{terminal_mapping[outgroup_name]}")
+    next_idx = sum(1 for _ in tree.iter_leaves())
+    for node in tree.traverse("postorder"):
+        if not node.is_leaf():
+            clade = frozenset(f"taxa{terminal_mapping[l.name]}" for l in node.iter_leaves())
+            match = next((n for n, c in clades.items() if c == clade), None)
+            node.add_feature("index", next_idx); next_idx += 1        # keep a unique index
+            node.add_feature("custom_name",
+                             match if match is not None
+                             else ("ROOT" if node.is_root() else f"Node({next_idx-1})"))
+
+    return tree
