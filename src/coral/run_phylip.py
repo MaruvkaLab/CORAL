@@ -107,9 +107,9 @@ def run_phylip_command(df, output_dir, exe_path, tree=None, prefix="run1", phyli
 
 
 def run_phylip(command, df_path, tree_path, output_dir, prefix, input_string, mapping, verbose=True, no_cache=False,
-               skip_no_tree=False):
+               skip_no_tree=False, max_sites=1_000_000):
     from ete3 import Tree
-    df = load_random_rows(df_path, verbose=verbose).astype(str)
+    df = load_random_rows(df_path, max_rows=max_sites, verbose=verbose).astype(str)   # both runs use the same sites
     tree = Tree(tree_path, format=1) if tree_path else None
 
     if tree is not None and mapping is not None:

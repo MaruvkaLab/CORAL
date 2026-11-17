@@ -823,5 +823,6 @@ class MultiSpeciesMutationPipeline:
             mapping=self.terminal_mapping,
             verbose=self.verbose,
             no_cache=self.no_cache,
-            skip_no_tree=self.params.get("skip_no_tree", False)
+            skip_no_tree=self.params.get("skip_no_tree", False),
+            max_sites=self.params.get("phylip_sites", 1_000_000)
         )

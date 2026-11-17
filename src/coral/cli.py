@@ -134,6 +134,8 @@ def main():
     multi.add_argument("--cores", type=int, default=None,
                        help="Number of cores to use. Default: use all available cores. "
                        "--cores 1 runs everything serially.")
+    multi.add_argument("--phylip-sites", type=int, default=1_000_000, metavar="N",
+                       help="PHYLIP runs on a random sample of at most N sites")
     multi.add_argument("--skip-no-tree", action="store_true",
                        help="With --newick-tree: don't search for the most parsimonious tree in PHYLIP.")
 
@@ -161,6 +163,8 @@ def main():
     phylip.add_argument("--prefix", default="phylip_run")
     phylip.add_argument("--input-string", default="Y\n")
     phylip.add_argument("--no-cache", action="store_true")
+    phylip.add_argument("--phylip-sites", type=int, default=1_000_000, metavar="N",
+                        help="Run PHYLIP on a random sample of at most N sites")
     verbose_group_phylip = phylip.add_mutually_exclusive_group()
     verbose_group_phylip.add_argument("--verbose", dest="verbose", action="store_true", help="Enable verbose logging (default: enabled)")
     verbose_group_phylip.add_argument("--quiet", dest="verbose", action="store_false", help="Disable verbose logging")
@@ -252,6 +256,7 @@ def main():
                 max_memory_mb=args.max_memory_mb,
                 indel_window=args.indel_window,
                 skip_no_tree=args.skip_no_tree,
+                phylip_sites=args.phylip_sites,
             )
             pipeline.run()
 
@@ -268,7 +273,8 @@ def main():
                 input_string=args.input_string,
                 mapping=mapping,
                 verbose=args.verbose,
-                no_cache=args.no_cache
+                no_cache=args.no_cache,
+                max_sites=args.phylip_sites
             )
 
         else:
